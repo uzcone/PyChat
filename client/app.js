@@ -11,7 +11,9 @@
 // Example:
 // wss://pychat-server.onrender.com
 
-const SERVER_URL = "wss://YOUR-SERVICE.onrender.com";
+
+const SERVER_URL = "wss://pychat-8gdk.onrender.com";
+
 
 let socket = null;
 let username = "";
