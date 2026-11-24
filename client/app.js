@@ -1,4 +1,3 @@
-
 "use strict";
 
 // =====================================
@@ -10,11 +9,9 @@ const SERVER_URL = "wss://pychat-8gdk.onrender.com";
 let socket = null;
 let username = "";
 let joined = false;
-let pendingResolve = null;
-let pendingReject = null;
 
 // =====================================
-// HTML ELEMENTS
+// HTML ELEMENTS (SAFE REFERENCES)
 // =====================================
 
 // Screens
@@ -44,11 +41,8 @@ const authTitle = document.getElementById("authTitle");
 const authSubtitle = document.getElementById("authSubtitle");
 
 // Password visibility
-const toggleLoginPassword =
-    document.getElementById("toggleLoginPassword");
-
-const toggleRegisterPassword =
-    document.getElementById("toggleRegisterPassword");
+const toggleLoginPassword = document.getElementById("toggleLoginPassword");
+const toggleRegisterPassword = document.getElementById("toggleRegisterPassword");
 
 // Chat
 const messages = document.getElementById("messages");
@@ -59,8 +53,7 @@ const userList = document.getElementById("userList");
 const userCount = document.getElementById("userCount");
 
 const statusDot = document.getElementById("statusDot");
-const connectionStatus =
-    document.getElementById("connectionStatus");
+const connectionStatus = document.getElementById("connectionStatus");
 
 const myUsername = document.getElementById("myUsername");
 const myAvatar = document.getElementById("myAvatar");
@@ -70,20 +63,14 @@ const leaveButton = document.getElementById("leaveButton");
 const logoutButton = document.getElementById("logoutButton");
 
 // Profile
-const profileMenuButton =
-    document.getElementById("profileMenuButton");
-
+const profileMenuButton = document.getElementById("profileMenuButton");
 const profileMenu = document.getElementById("profileMenu");
-const changeAvatarButton =
-    document.getElementById("changeAvatarButton");
-
+const changeAvatarButton = document.getElementById("changeAvatarButton");
 const avatarUpload = document.getElementById("avatarUpload");
 
 // Other chat elements
 const userSearch = document.getElementById("userSearch");
-const conversationList =
-    document.getElementById("conversationList");
-
+const conversationList = document.getElementById("conversationList");
 const chatTitle = document.getElementById("chatTitle");
 const chatSubtitle = document.getElementById("chatSubtitle");
 
@@ -93,8 +80,12 @@ const chatSubtitle = document.getElementById("chatSubtitle");
 // =====================================
 
 function setStatus(online, text) {
-    statusDot.classList.toggle("online", online);
-    connectionStatus.textContent = text;
+    if (statusDot) {
+        statusDot.classList.toggle("online", Boolean(online));
+    }
+    if (connectionStatus) {
+        connectionStatus.textContent = text;
+    }
 }
 
 
@@ -103,25 +94,29 @@ function setStatus(online, text) {
 // =====================================
 
 function showLoginForm() {
-    loginForm.classList.remove("hidden");
-    registerForm.classList.add("hidden");
+    if (loginForm) loginForm.classList.remove("hidden");
+    if (registerForm) registerForm.classList.add("hidden");
 
-    authTitle.textContent = "Welcome back";
-    authSubtitle.textContent = "Sign in to continue to PyChat";
+    if (authTitle) authTitle.textContent = "Welcome back";
+    if (authSubtitle) authSubtitle.textContent = "Sign in to continue to PyChat";
 
-    loginError.textContent = "";
-    registerError.textContent = "";
+    if (loginError) loginError.textContent = "";
+    if (registerError) registerError.textContent = "";
+
+    if (loginUsername) loginUsername.focus();
 }
 
 function showRegisterForm() {
-    loginForm.classList.add("hidden");
-    registerForm.classList.remove("hidden");
+    if (loginForm) loginForm.classList.add("hidden");
+    if (registerForm) registerForm.classList.remove("hidden");
 
-    authTitle.textContent = "Create account";
-    authSubtitle.textContent = "Join the PyChat community";
+    if (authTitle) authTitle.textContent = "Create account";
+    if (authSubtitle) authSubtitle.textContent = "Join the PyChat community";
 
-    loginError.textContent = "";
-    registerError.textContent = "";
+    if (loginError) loginError.textContent = "";
+    if (registerError) registerError.textContent = "";
+
+    if (registerUsername) registerUsername.focus();
 }
 
 
@@ -132,14 +127,10 @@ function showRegisterForm() {
 function togglePassword(input, button) {
     if (!input || !button) return;
 
-    const visible = input.type === "password";
-
-    input.type = visible ? "text" : "password";
-    button.textContent = visible ? "Hide" : "Show";
-    button.setAttribute(
-        "aria-label",
-        visible ? "Hide password" : "Show password"
-    );
+    const makeVisible = input.type === "password";
+    input.type = makeVisible ? "text" : "password";
+    button.textContent = makeVisible ? "Hide" : "Show";
+    button.setAttribute("aria-label", makeVisible ? "Hide password" : "Show password");
 }
 
 
@@ -149,9 +140,12 @@ function togglePassword(input, button) {
 
 function connectAndAuthenticate(type, credentials) {
     return new Promise((resolve, reject) => {
-
         if (socket) {
-            socket.close();
+            try {
+                socket.close();
+            } catch {
+                // Ignore close errors
+            }
             socket = null;
         }
 
@@ -161,26 +155,23 @@ function connectAndAuthenticate(type, credentials) {
         }
 
         let settled = false;
-
-        pendingResolve = resolve;
-        pendingReject = reject;
-
         const ws = new WebSocket(SERVER_URL);
         socket = ws;
 
         function fail(error) {
             if (settled) return;
-
             settled = true;
-            pendingResolve = null;
-            pendingReject = null;
-
             reject(error);
+        }
+
+        function succeed() {
+            if (settled) return;
+            settled = true;
+            resolve(true);
         }
 
         ws.onopen = () => {
             setStatus(true, "Connected");
-
             ws.send(JSON.stringify({
                 type: type,
                 ...credentials
@@ -189,22 +180,12 @@ function connectAndAuthenticate(type, credentials) {
 
         ws.onmessage = (event) => {
             let packet;
-
             try {
                 packet = JSON.parse(event.data);
             } catch {
                 return;
             }
-
-            handlePacket(packet, () => {
-                if (settled) return;
-
-                settled = true;
-                pendingResolve = null;
-                pendingReject = null;
-
-                resolve(true);
-            }, fail);
+            handlePacket(packet, succeed, fail);
         };
 
         ws.onerror = () => {
@@ -222,16 +203,15 @@ function connectAndAuthenticate(type, credentials) {
             if (joined) {
                 joined = false;
                 showLogin();
-
-                loginError.textContent =
-                    "Connection lost. Please sign in again.";
+                if (loginError) {
+                    loginError.textContent = "Connection lost. Please sign in again.";
+                }
             }
 
             if (socket === ws) {
                 socket = null;
             }
         };
-
     });
 }
 
@@ -241,70 +221,56 @@ function connectAndAuthenticate(type, credentials) {
 // =====================================
 
 function handlePacket(packet, onSuccess, onError) {
+    if (!packet || !packet.type) return;
 
     switch (packet.type) {
-
-        case "WELCOME":
-
+        case "WELCOME": {
             joined = true;
-
             username = packet.username || username;
 
-            myUsername.textContent = username;
-            myAvatar.textContent =
-                username.charAt(0).toUpperCase();
+            if (myUsername) myUsername.textContent = username;
+            if (myAvatar) myAvatar.textContent = username.charAt(0).toUpperCase() || "U";
 
-            loginScreen.classList.add("hidden");
-            chatScreen.classList.remove("hidden");
+            if (loginScreen) loginScreen.classList.add("hidden");
+            if (chatScreen) chatScreen.classList.remove("hidden");
 
-            chatTitle.textContent = "General Chat";
-            chatSubtitle.textContent =
-                "Welcome to the PyChat community";
+            if (chatTitle) chatTitle.textContent = "General Chat";
+            if (chatSubtitle) chatSubtitle.textContent = "Welcome to the PyChat community";
 
             addNotice(packet.message || "Welcome to PyChat!");
+            if (messageInput) messageInput.focus();
 
-            onSuccess();
+            if (typeof onSuccess === "function") onSuccess();
             break;
+        }
 
-
-        case "MESSAGE":
-
-            addMessage(
-                packet.username,
-                packet.message
-            );
-
+        case "MESSAGE": {
+            addMessage(packet.username || "User", packet.message || "");
             break;
+        }
 
-
-        case "NOTICE":
-
-            addNotice(packet.message);
+        case "NOTICE": {
+            addNotice(packet.message || "");
             break;
+        }
 
-
-        case "USERS":
-
-            updateUsers(packet.users || []);
-
-            userCount.textContent =
-                packet.count ?? (packet.users || []).length;
-
-            break;
-
-
-        case "ERROR":
-
-            if (!joined) {
-                onError(
-                    new Error(packet.message || "Authentication failed.")
-                );
-            } else {
-                addNotice("Error: " + packet.message);
+        case "USERS": {
+            const list = Array.isArray(packet.users) ? packet.users : [];
+            updateUsers(list);
+            if (userCount) {
+                userCount.textContent = String(packet.count ?? list.length);
             }
-
             break;
+        }
 
+        case "ERROR": {
+            if (!joined && typeof onError === "function") {
+                onError(new Error(packet.message || "Authentication failed."));
+            } else {
+                addNotice("Error: " + (packet.message || "Unknown error"));
+            }
+            break;
+        }
 
         case "PONG":
             break;
@@ -317,28 +283,27 @@ function handlePacket(packet, onSuccess, onError) {
 // =====================================
 
 async function login() {
+    const name = loginUsername ? loginUsername.value.trim() : "";
+    const password = loginPassword ? loginPassword.value : "";
 
-    const name = loginUsername.value.trim();
-    const password = loginPassword.value;
-
-    loginError.textContent = "";
+    if (loginError) loginError.textContent = "";
 
     if (!name || !password) {
-        loginError.textContent =
-            "Please enter your username and password.";
+        if (loginError) loginError.textContent = "Please enter your username and password.";
         return;
     }
 
     if (name.length < 3 || name.length > 30) {
-        loginError.textContent =
-            "Username must be 3–30 characters.";
+        if (loginError) loginError.textContent = "Username must be 3–30 characters.";
         return;
     }
 
     username = name;
 
-    loginButton.disabled = true;
-    loginButton.textContent = "Signing in...";
+    if (loginButton) {
+        loginButton.disabled = true;
+        loginButton.textContent = "Signing in...";
+    }
 
     try {
         await connectAndAuthenticate("LOGIN", {
@@ -346,18 +311,21 @@ async function login() {
             password: password
         });
 
-        loginPassword.value = "";
-
+        if (loginPassword) loginPassword.value = "";
     } catch (error) {
-        loginError.textContent = error.message;
-
+        if (loginError) loginError.textContent = error.message;
         if (socket) {
-            socket.close();
+            try {
+                socket.close();
+            } catch {
+                // Ignore close errors
+            }
         }
-
     } finally {
-        loginButton.disabled = false;
-        loginButton.textContent = "Sign In";
+        if (loginButton) {
+            loginButton.disabled = false;
+            loginButton.textContent = "Sign In";
+        }
     }
 }
 
@@ -367,41 +335,38 @@ async function login() {
 // =====================================
 
 async function register() {
+    const name = registerUsername ? registerUsername.value.trim() : "";
+    const password = registerPassword ? registerPassword.value : "";
+    const confirmation = confirmPassword ? confirmPassword.value : "";
 
-    const name = registerUsername.value.trim();
-    const password = registerPassword.value;
-    const confirmation = confirmPassword.value;
-
-    registerError.textContent = "";
+    if (registerError) registerError.textContent = "";
 
     if (!name || !password || !confirmation) {
-        registerError.textContent =
-            "Please complete all fields.";
+        if (registerError) registerError.textContent = "Please complete all fields.";
         return;
     }
 
     if (!/^[a-zA-Z0-9_]{3,30}$/.test(name)) {
-        registerError.textContent =
-            "Use 3–30 letters, numbers or underscores.";
+        if (registerError) registerError.textContent = "Use 3–30 letters, numbers or underscores.";
         return;
     }
 
     if (password.length < 8) {
-        registerError.textContent =
-            "Password must contain at least 8 characters.";
+        if (registerError) registerError.textContent = "Password must contain at least 8 characters.";
         return;
     }
 
     if (password !== confirmation) {
-        registerError.textContent =
-            "Passwords do not match.";
+        if (registerError) registerError.textContent = "Passwords do not match.";
         return;
     }
 
     username = name;
 
-    registerButton.disabled = true;
-    registerButton.textContent = "Creating account...";
+    if (registerButton) {
+        registerButton.disabled = true;
+        registerButton.textContent = "Creating account...";
+    }
 
     try {
         await connectAndAuthenticate("REGISTER", {
@@ -409,19 +374,22 @@ async function register() {
             password: password
         });
 
-        registerPassword.value = "";
-        confirmPassword.value = "";
-
+        if (registerPassword) registerPassword.value = "";
+        if (confirmPassword) confirmPassword.value = "";
     } catch (error) {
-        registerError.textContent = error.message;
-
+        if (registerError) registerError.textContent = error.message;
         if (socket) {
-            socket.close();
+            try {
+                socket.close();
+            } catch {
+                // Ignore close errors
+            }
         }
-
     } finally {
-        registerButton.disabled = false;
-        registerButton.textContent = "Create Account";
+        if (registerButton) {
+            registerButton.disabled = false;
+            registerButton.textContent = "Create Account";
+        }
     }
 }
 
@@ -431,9 +399,9 @@ async function register() {
 // =====================================
 
 function sendMessage() {
+    if (!messageInput) return;
 
     const text = messageInput.value.trim();
-
     if (!text || !joined) return;
 
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -456,18 +424,15 @@ function sendMessage() {
 // =====================================
 
 function addMessage(sender, text) {
+    if (!messages) return;
 
-    const emptyState =
-        messages.querySelector(".empty-state");
-
+    const emptyState = messages.querySelector(".empty-state");
     if (emptyState) {
         emptyState.remove();
     }
 
     const message = document.createElement("div");
-
-    message.className = "message" +
-        (sender === username ? " mine" : "");
+    message.className = "message" + (sender === username ? " mine" : "");
 
     const meta = document.createElement("div");
     meta.className = "message-meta";
@@ -481,7 +446,6 @@ function addMessage(sender, text) {
     message.appendChild(bubble);
 
     messages.appendChild(message);
-
     messages.scrollTop = messages.scrollHeight;
 }
 
@@ -491,14 +455,13 @@ function addMessage(sender, text) {
 // =====================================
 
 function addNotice(text) {
+    if (!messages) return;
 
     const notice = document.createElement("div");
-
     notice.className = "notice";
     notice.textContent = text;
 
     messages.appendChild(notice);
-
     messages.scrollTop = messages.scrollHeight;
 }
 
@@ -508,15 +471,12 @@ function addNotice(text) {
 // =====================================
 
 function updateUsers(users) {
+    if (!userList) return;
 
     userList.replaceChildren();
 
-    users.forEach(user => {
-
-        const name = typeof user === "string"
-            ? user
-            : user.username;
-
+    users.forEach((user) => {
+        const name = typeof user === "string" ? user : user?.username;
         if (!name) return;
 
         const li = document.createElement("li");
@@ -544,14 +504,13 @@ function updateUsers(users) {
 // AVATAR PREVIEW
 // =====================================
 
-avatarUpload.addEventListener("change", () => {
-
-    const file = avatarUpload.files[0];
-
+avatarUpload?.addEventListener("change", () => {
+    const file = avatarUpload.files?.[0];
     if (!file) return;
 
     if (!file.type.startsWith("image/")) {
         alert("Please select an image.");
+        avatarUpload.value = "";
         return;
     }
 
@@ -562,13 +521,15 @@ avatarUpload.addEventListener("change", () => {
     }
 
     const reader = new FileReader();
-
     reader.onload = () => {
-        myAvatarImage.src = reader.result;
-        myAvatarImage.classList.remove("hidden");
-        myAvatar.classList.add("hidden");
+        if (myAvatarImage) {
+            myAvatarImage.src = reader.result;
+            myAvatarImage.classList.remove("hidden");
+        }
+        if (myAvatar) {
+            myAvatar.classList.add("hidden");
+        }
     };
-
     reader.readAsDataURL(file);
 });
 
@@ -577,13 +538,24 @@ avatarUpload.addEventListener("change", () => {
 // PROFILE MENU
 // =====================================
 
-profileMenuButton.addEventListener("click", () => {
-    profileMenu.classList.toggle("hidden");
+profileMenuButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    profileMenu?.classList.toggle("hidden");
 });
 
-changeAvatarButton.addEventListener("click", () => {
-    profileMenu.classList.add("hidden");
-    avatarUpload.click();
+changeAvatarButton?.addEventListener("click", () => {
+    profileMenu?.classList.add("hidden");
+    avatarUpload?.click();
+});
+
+document.addEventListener("click", (event) => {
+    if (!profileMenu || profileMenu.classList.contains("hidden")) return;
+    if (
+        !profileMenu.contains(event.target) &&
+        !profileMenuButton?.contains(event.target)
+    ) {
+        profileMenu.classList.add("hidden");
+    }
 });
 
 
@@ -592,32 +564,29 @@ changeAvatarButton.addEventListener("click", () => {
 // =====================================
 
 function leaveChat() {
-
     joined = false;
 
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
             type: "LEAVE"
         }));
-
         socket.close();
     }
 
     socket = null;
-
     showLogin();
 }
 
 function logout() {
     leaveChat();
 
-    loginPassword.value = "";
-    loginUsername.value = "";
+    if (loginPassword) loginPassword.value = "";
+    if (loginUsername) loginUsername.value = "";
 
-    profileMenu.classList.add("hidden");
+    profileMenu?.classList.add("hidden");
 
-    myAvatarImage.classList.add("hidden");
-    myAvatar.classList.remove("hidden");
+    if (myAvatarImage) myAvatarImage.classList.add("hidden");
+    if (myAvatar) myAvatar.classList.remove("hidden");
 
     showLoginForm();
 }
@@ -628,34 +597,34 @@ function logout() {
 // =====================================
 
 function showLogin() {
-
-    loginScreen.classList.remove("hidden");
-    chatScreen.classList.add("hidden");
+    if (loginScreen) loginScreen.classList.remove("hidden");
+    if (chatScreen) chatScreen.classList.add("hidden");
 
     setStatus(false, "Offline");
 
-    messages.replaceChildren();
+    if (messages) {
+        messages.replaceChildren();
 
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
 
-    const icon = document.createElement("div");
-    icon.className = "empty-icon";
-    icon.textContent = "P";
+        const icon = document.createElement("div");
+        icon.className = "empty-icon";
+        icon.textContent = "P";
 
-    const title = document.createElement("h3");
-    title.textContent = "Welcome to PyChat!";
+        const title = document.createElement("h3");
+        title.textContent = "Welcome to PyChat!";
 
-    const description = document.createElement("p");
-    description.textContent = "Send your first message.";
+        const description = document.createElement("p");
+        description.textContent = "Send your first message.";
 
-    empty.append(icon, title, description);
-    messages.appendChild(empty);
+        empty.append(icon, title, description);
+        messages.appendChild(empty);
+    }
 
-    userList.replaceChildren();
-    conversationList.replaceChildren();
-
-    userCount.textContent = "0";
+    if (userList) userList.replaceChildren();
+    if (conversationList) conversationList.replaceChildren();
+    if (userCount) userCount.textContent = "0";
 }
 
 
@@ -663,37 +632,45 @@ function showLogin() {
 // EVENT LISTENERS
 // =====================================
 
-loginForm.addEventListener("submit", event => {
+loginForm?.addEventListener("submit", (event) => {
     event.preventDefault();
     login();
 });
 
-registerForm.addEventListener("submit", event => {
+registerForm?.addEventListener("submit", (event) => {
     event.preventDefault();
     register();
 });
 
-showRegister.addEventListener("click", showRegisterForm);
-showLoginButton.addEventListener("click", showLoginForm);
+showRegister?.addEventListener("click", (event) => {
+    event.preventDefault();
+    showRegisterForm();
+});
 
-toggleLoginPassword.addEventListener("click", () => {
+showLoginButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    showLoginForm();
+});
+
+toggleLoginPassword?.addEventListener("click", () => {
     togglePassword(loginPassword, toggleLoginPassword);
 });
 
-toggleRegisterPassword.addEventListener("click", () => {
+toggleRegisterPassword?.addEventListener("click", () => {
     togglePassword(registerPassword, toggleRegisterPassword);
 });
 
-sendButton.addEventListener("click", sendMessage);
+sendButton?.addEventListener("click", sendMessage);
 
-messageInput.addEventListener("keydown", event => {
+messageInput?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
+        event.preventDefault();
         sendMessage();
     }
 });
 
-leaveButton.addEventListener("click", leaveChat);
-logoutButton.addEventListener("click", logout);
+leaveButton?.addEventListener("click", leaveChat);
+logoutButton?.addEventListener("click", logout);
 
 
 // =====================================
