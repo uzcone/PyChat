@@ -1,9 +1,10 @@
 
-import asyncio
-import json
-import logging
 import os
-from datetime import datetime, timezone
+import json
+import asyncio
+import hashlib
+import secrets
+import re
 
 import asyncpg
 from websockets.asyncio.server import serve
@@ -19,28 +20,63 @@ PORT = int(os.environ.get("PORT", 8765))
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-MAX_USERNAME_LENGTH = 20
-MAX_MESSAGE_LENGTH = 1000
-HISTORY_LIMIT = 50
-
-clients = {}
 db_pool = None
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+# Connected users
+clients = {}
 
 
 # =====================================
-# DATABASE
+# PASSWORD SECURITY
+# =====================================
+
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+
+    hashed = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        310000
+    )
+
+    return (
+        salt.hex() + "$" + hashed.hex()
+    )
+
+
+def verify_password(password, stored_hash):
+    try:
+        salt_hex, hash_hex = stored_hash.split("$")
+
+        salt = bytes.fromhex(salt_hex)
+
+        new_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            310000
+        )
+
+        return secrets.compare_digest(
+            new_hash.hex(),
+            hash_hex
+        )
+
+    except (ValueError, TypeError):
+        return False
+
+
+# =====================================
+# DATABASE INITIALIZATION
 # =====================================
 
 async def init_database():
+
     global db_pool
 
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is missing")
+        raise RuntimeError("DATABASE_URL is missing!")
 
     db_pool = await asyncpg.create_pool(
         dsn=DATABASE_URL,
@@ -49,353 +85,369 @@ async def init_database():
         command_timeout=30
     )
 
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_messages (
+    async with db_pool.acquire() as connection:
+
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS users (
                 id BIGSERIAL PRIMARY KEY,
-                username VARCHAR(20) NOT NULL,
-                message TEXT NOT NULL,
+                username VARCHAR(30) NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                avatar_type VARCHAR(20) DEFAULT 'preset',
+                avatar_value TEXT DEFAULT 'avatar-1',
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
 
-    logging.info("PostgreSQL connected successfully")
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id BIGSERIAL PRIMARY KEY,
+                sender_id BIGINT NOT NULL
+                    REFERENCES users(id),
+                recipient_id BIGINT
+                    REFERENCES users(id),
+                content TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                read_at TIMESTAMPTZ
+            );
+        """)
 
-
-async def save_message(username, message):
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            INSERT INTO chat_messages
-                (username, message)
-            VALUES ($1, $2)
-            RETURNING id, created_at
-        """, username, message)
-
-    return row
-
-
-async def get_message_history():
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT username, message, created_at
-            FROM (
-                SELECT id, username, message, created_at
-                FROM chat_messages
-                ORDER BY id DESC
-                LIMIT $1
-            ) AS recent
-            ORDER BY id ASC
-        """, HISTORY_LIMIT)
-
-    return rows
+    print("PostgreSQL connected successfully.")
 
 
 # =====================================
-# PROTOCOL
+# SEND JSON
 # =====================================
 
-def create_packet(packet_type, **data):
-    return json.dumps({
-        "type": packet_type,
-        "timestamp": datetime.now(
-            timezone.utc
-        ).isoformat(timespec="seconds"),
-        **data
-    }, ensure_ascii=False)
+async def send_packet(websocket, packet):
 
-
-async def send_packet(ws, packet_type, **data):
-    await ws.send(create_packet(packet_type, **data))
+    await websocket.send(
+        json.dumps(packet, ensure_ascii=False)
+    )
 
 
 # =====================================
 # ONLINE USERS
 # =====================================
 
-def online_users():
-    return list(clients.values())
+async def broadcast_users():
 
+    users = [
+        client["username"]
+        for client in clients.values()
+    ]
 
-async def broadcast(packet_type, **data):
-    if not clients:
-        return
+    packet = {
+        "type": "USERS",
+        "users": users,
+        "count": len(users)
+    }
 
-    packet = create_packet(packet_type, **data)
-    connections = list(clients.keys())
+    disconnected = []
 
-    results = await asyncio.gather(
-        *(ws.send(packet) for ws in connections),
-        return_exceptions=True
-    )
+    for websocket in list(clients.keys()):
 
-    for ws, result in zip(connections, results):
-        if isinstance(result, Exception):
-            clients.pop(ws, None)
-            logging.warning("Inactive client removed")
-
-
-async def update_users():
-    await broadcast(
-        "USERS",
-        users=online_users(),
-        count=len(clients)
-    )
-
-
-# =====================================
-# CLIENT HANDLER
-# =====================================
-
-async def handle_client(ws):
-    username = None
-
-    logging.info("New client connected")
-
-    try:
-        # First packet must be JOIN
         try:
-            raw = await asyncio.wait_for(
-                ws.recv(), timeout=30
-            )
-            data = json.loads(raw)
+            await send_packet(websocket, packet)
 
-        except asyncio.TimeoutError:
-            await send_packet(
-                ws, "ERROR", message="JOIN timeout"
-            )
-            return
+        except ConnectionClosed:
+            disconnected.append(websocket)
 
-        except (json.JSONDecodeError, TypeError):
-            await send_packet(
-                ws, "ERROR", message="Invalid JSON"
-            )
-            return
+    for websocket in disconnected:
+        clients.pop(websocket, None)
 
-        if not isinstance(data, dict):
-            await send_packet(
-                ws, "ERROR", message="Invalid packet"
-            )
-            return
 
-        if data.get("type") != "JOIN":
-            await send_packet(
-                ws, "ERROR", message="JOIN required"
-            )
-            return
+# =====================================
+# BROADCAST MESSAGE
+# =====================================
 
-        username = data.get("username", "")
+async def broadcast_message(packet):
 
-        if not isinstance(username, str):
-            await send_packet(
-                ws, "ERROR", message="Invalid username"
-            )
-            return
+    disconnected = []
 
-        username = username.strip()
+    for websocket in list(clients.keys()):
 
-        if not username or len(username) > MAX_USERNAME_LENGTH:
-            await send_packet(
-                ws,
-                "ERROR",
-                message="Username must be 1-20 characters"
-            )
-            return
+        try:
+            await send_packet(websocket, packet)
 
-        # Check duplicate usernames
-        if username.casefold() in [
-            name.casefold() for name in clients.values()
-        ]:
-            await send_packet(
-                ws,
-                "ERROR",
-                message="Username already exists"
-            )
-            return
+        except ConnectionClosed:
+            disconnected.append(websocket)
 
-        # Register client
-        clients[ws] = username
+    for websocket in disconnected:
+        clients.pop(websocket, None)
 
-        logging.info("%s joined", username)
 
-        await send_packet(
-            ws,
-            "WELCOME",
-            username=username,
-            message=f"Welcome to PyChat, {username}!"
+# =====================================
+# AUTHENTICATION
+# =====================================
+
+async def authenticate(packet):
+
+    action = packet.get("type")
+
+    username = packet.get("username", "").strip()
+    password = packet.get("password", "")
+
+    if not isinstance(username, str):
+        raise ValueError("Invalid username.")
+
+    if not isinstance(password, str):
+        raise ValueError("Invalid password.")
+
+    if not re.fullmatch(r"[a-zA-Z0-9_]{3,30}", username):
+        raise ValueError(
+            "Username must contain 3-30 letters, numbers or underscores."
         )
 
-        # Load previous messages
-        history = await get_message_history()
-
-        for item in history:
-            await send_packet(
-                ws,
-                "MESSAGE",
-                username=item["username"],
-                message=item["message"],
-                timestamp=item["created_at"].isoformat(
-                    timespec="seconds"
-                )
-            )
-
-        await broadcast(
-            "NOTICE",
-            message=f"{username} joined the chat"
+    if len(password) < 8 or len(password) > 128:
+        raise ValueError(
+            "Password must contain 8-128 characters."
         )
 
-        await update_users()
+    async with db_pool.acquire() as connection:
 
-        # Receive messages
-        async for raw in ws:
+        if action == "REGISTER":
+
+            password_hash = hash_password(password)
 
             try:
-                data = json.loads(raw)
 
-            except (json.JSONDecodeError, TypeError):
-                await send_packet(
-                    ws, "ERROR", message="Invalid JSON"
+                user = await connection.fetchrow("""
+                    INSERT INTO users (
+                        username,
+                        password_hash
+                    )
+                    VALUES ($1, $2)
+                    RETURNING id, username
+                """, username, password_hash)
+
+                return user
+
+            except asyncpg.UniqueViolationError:
+
+                raise ValueError(
+                    "This username is already taken."
                 )
+
+        elif action == "LOGIN":
+
+            user = await connection.fetchrow("""
+                SELECT id, username, password_hash
+                FROM users
+                WHERE username = $1
+            """, username)
+
+            if not user:
+                raise ValueError(
+                    "Incorrect username or password."
+                )
+
+            if not verify_password(
+                password,
+                user["password_hash"]
+            ):
+                raise ValueError(
+                    "Incorrect username or password."
+                )
+
+            return user
+
+        else:
+            raise ValueError("Unknown authentication request.")
+
+
+# =====================================
+# SAVE MESSAGE
+# =====================================
+
+async def save_message(user_id, message):
+
+    async with db_pool.acquire() as connection:
+
+        await connection.execute("""
+            INSERT INTO messages (
+                sender_id,
+                content
+            )
+            VALUES ($1, $2)
+        """, user_id, message)
+
+
+# =====================================
+# HANDLE CLIENT
+# =====================================
+
+async def handle_client(websocket):
+
+    user = None
+    username = None
+
+    try:
+
+        # FIRST PACKET: LOGIN OR REGISTER
+
+        raw_packet = await asyncio.wait_for(
+            websocket.recv(),
+            timeout=30
+        )
+
+        packet = json.loads(raw_packet)
+
+        user = await authenticate(packet)
+
+        username = user["username"]
+
+        # Prevent duplicate online sessions
+        already_online = any(
+            client["username"] == username
+            for client in clients.values()
+        )
+
+        if already_online:
+            await send_packet(websocket, {
+                "type": "ERROR",
+                "message": "This account is already online."
+            })
+            return
+
+        # Register connected client
+        clients[websocket] = {
+            "id": user["id"],
+            "username": username
+        }
+
+        await send_packet(websocket, {
+            "type": "WELCOME",
+            "username": username,
+            "message": "Welcome to PyChat, " + username + "!"
+        })
+
+        await broadcast_message({
+            "type": "NOTICE",
+            "message": username + " joined PyChat."
+        })
+
+        await broadcast_users()
+
+        print(username, "connected.")
+
+        # =================================
+        # MAIN MESSAGE LOOP
+        # =================================
+
+        async for raw_message in websocket:
+
+            try:
+                packet = json.loads(raw_message)
+
+            except json.JSONDecodeError:
                 continue
 
-            if not isinstance(data, dict):
-                await send_packet(
-                    ws, "ERROR", message="Invalid packet"
-                )
-                continue
+            packet_type = packet.get("type")
 
-            packet_type = data.get("type")
-
+            # SEND MESSAGE
             if packet_type == "MESSAGE":
 
-                message = data.get("message", "")
+                message = packet.get("message", "")
 
                 if not isinstance(message, str):
-                    await send_packet(
-                        ws,
-                        "ERROR",
-                        message="Message must be text"
-                    )
                     continue
 
                 message = message.strip()
 
-                if not message:
+                if not message or len(message) > 1000:
                     continue
 
-                if len(message) > MAX_MESSAGE_LENGTH:
-                    await send_packet(
-                        ws,
-                        "ERROR",
-                        message="Message is too long"
-                    )
-                    continue
-
-                # Save message to PostgreSQL
-                try:
-                    saved = await save_message(
-                        username, message
-                    )
-
-                except Exception:
-                    logging.exception(
-                        "Message database save failed"
-                    )
-
-                    await send_packet(
-                        ws,
-                        "ERROR",
-                        message="Message could not be saved"
-                    )
-                    continue
-
-                logging.info(
-                    "[%s]: %s", username, message
+                await save_message(
+                    user["id"],
+                    message
                 )
 
-                # Broadcast saved message
-                await broadcast(
-                    "MESSAGE",
-                    username=username,
-                    message=message,
-                    timestamp=saved["created_at"].isoformat(
-                        timespec="seconds"
-                    )
-                )
+                await broadcast_message({
+                    "type": "MESSAGE",
+                    "username": username,
+                    "message": message
+                })
 
-            elif packet_type == "USERS":
-                await send_packet(
-                    ws,
-                    "USERS",
-                    users=online_users(),
-                    count=len(clients)
-                )
-
+            # PING
             elif packet_type == "PING":
-                await send_packet(ws, "PONG")
 
+                await send_packet(websocket, {
+                    "type": "PONG"
+                })
+
+            # LEAVE
             elif packet_type == "LEAVE":
-                await ws.close(
-                    code=1000,
-                    reason="User left"
-                )
                 break
 
-            else:
-                await send_packet(
-                    ws,
-                    "ERROR",
-                    message="Unknown packet type"
-                )
+    except ValueError as error:
+
+        try:
+            await send_packet(websocket, {
+                "type": "ERROR",
+                "message": str(error)
+            })
+        except ConnectionClosed:
+            pass
+
+    except asyncio.TimeoutError:
+
+        print("Authentication timeout.")
 
     except ConnectionClosed:
-        logging.info(
-            "%s disconnected", username or "Unknown client"
-        )
+        pass
 
-    except Exception:
-        logging.exception("Client handler error")
+    except Exception as error:
+
+        print("Server error:", str(error))
+
+        try:
+            await send_packet(websocket, {
+                "type": "ERROR",
+                "message": "Server error. Please try again."
+            })
+        except ConnectionClosed:
+            pass
 
     finally:
-        if ws in clients:
-            left_username = clients.pop(ws)
 
-            logging.info("%s left", left_username)
+        if websocket in clients:
 
-            await broadcast(
-                "NOTICE",
-                message=f"{left_username} left the chat"
-            )
+            clients.pop(websocket, None)
 
-            await update_users()
+            if username:
+                print(username, "disconnected.")
+
+                await broadcast_message({
+                    "type": "NOTICE",
+                    "message": username + " left PyChat."
+                })
+
+            await broadcast_users()
 
 
 # =====================================
-# START SERVER
+# MAIN
 # =====================================
 
 async def main():
-    logging.info("Starting PyChat Server...")
 
     await init_database()
+
+    print("PyChat server starting...")
 
     async with serve(
         handle_client,
         HOST,
         PORT,
-        max_size=64 * 1024,
         ping_interval=20,
-        ping_timeout=20
+        ping_timeout=20,
+        max_size=2**20
     ):
-        logging.info(
-            "PyChat Server running on port %s", PORT
-        )
+
+        print("PyChat server running on port", PORT)
 
         await asyncio.Future()
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-
-    except KeyboardInterrupt:
-        logging.info("Server stopped")
+    asyncio.run(main())
