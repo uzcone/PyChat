@@ -1,0 +1,132 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#173f2a">
+
+    <title>PyChat - Real-time Messaging</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="app">
+
+        <!-- HEADER -->
+        <header class="header">
+            <div class="brand">
+                <div class="brand-icon">P</div>
+                <div>
+                    <h1>PyChat</h1>
+                    <p>Real-time messaging</p>
+                </div>
+            </div>
+
+            <div class="connection">
+                <span id="statusDot" class="status-dot"></span>
+                <span id="connectionStatus">Offline</span>
+            </div>
+        </header>
+
+        <!-- LOGIN SCREEN -->
+        <section id="loginScreen" class="login-screen">
+            <div class="login-card">
+                <div class="welcome-icon">P</div>
+
+                <h2>Welcome to PyChat</h2>
+
+                <p>
+                    Connect with people in real time.
+                </p>
+
+                <label for="username">Your username</label>
+
+                <input
+                    id="username"
+                    type="text"
+                    maxlength="20"
+                    placeholder="Enter your name"
+                    autocomplete="off"
+                >
+
+                <button id="joinButton">
+                    Join Chat
+                </button>
+
+                <p id="loginError" class="error"></p>
+
+                <div class="login-footer">
+                    Powered by Python WebSocket
+                </div>
+            </div>
+        </section>
+
+        <!-- CHAT SCREEN -->
+        <section id="chatScreen" class="chat-screen hidden">
+
+            <aside class="sidebar">
+                <div class="sidebar-title">
+                    <h3>Online Users</h3>
+                    <span id="userCount">0</span>
+                </div>
+
+                <ul id="userList" class="user-list"></ul>
+
+                <div class="profile">
+                    <div class="avatar" id="myAvatar">T</div>
+                    <div>
+                        <strong id="myUsername">User</strong>
+                        <small>Online</small>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="chat-main">
+
+                <div class="chat-heading">
+                    <div>
+                        <h2>General Chat</h2>
+                        <p>Welcome to the PyChat community</p>
+                    </div>
+
+                    <button id="leaveButton" class="leave-button">
+                        Leave
+                    </button>
+                </div>
+
+                <div id="messages" class="messages">
+                    <div class="empty-state">
+                        <div class="empty-icon">P</div>
+                        <h3>Welcome to PyChat!</h3>
+                        <p>Send your first message.</p>
+                    </div>
+                </div>
+
+                <div class="message-area">
+                    <input
+                        id="messageInput"
+                        type="text"
+                        maxlength="1000"
+                        placeholder="Type a message..."
+                        autocomplete="off"
+                    >
+
+                    <button id="sendButton">
+                        Send
+                    </button>
+                </div>
+
+            </main>
+        </section>
+
+        <footer class="footer">
+            PyChat © 2026 · Python Network Programming
+        </footer>
+
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
