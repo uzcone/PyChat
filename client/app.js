@@ -38,7 +38,7 @@ const loginError = document.getElementById("loginError");
 const registerError = document.getElementById("registerError");
 
 const showRegister = document.getElementById("showRegister");
-const showLogin = document.getElementById("showLogin");
+const showLoginButton = document.getElementById("showLogin");
 
 const authTitle = document.getElementById("authTitle");
 const authSubtitle = document.getElementById("authSubtitle");
@@ -674,7 +674,7 @@ registerForm.addEventListener("submit", event => {
 });
 
 showRegister.addEventListener("click", showRegisterForm);
-showLogin.addEventListener("click", showLoginForm);
+showLoginButton.addEventListener("click", showLoginForm);
 
 toggleLoginPassword.addEventListener("click", () => {
     togglePassword(loginPassword, toggleLoginPassword);
