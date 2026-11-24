@@ -231,6 +231,10 @@ function handlePacket(packet, onSuccess, onError) {
             if (myUsername) myUsername.textContent = username;
             if (myAvatar) myAvatar.textContent = username.charAt(0).toUpperCase() || "U";
 
+            if (messages) {
+                messages.replaceChildren();
+            }
+
             if (loginScreen) loginScreen.classList.add("hidden");
             if (chatScreen) chatScreen.classList.remove("hidden");
 
@@ -241,6 +245,15 @@ function handlePacket(packet, onSuccess, onError) {
             if (messageInput) messageInput.focus();
 
             if (typeof onSuccess === "function") onSuccess();
+            break;
+        }
+
+        case "HISTORY": {
+            const historyList = Array.isArray(packet.messages) ? packet.messages : [];
+            historyList.forEach((item) => {
+                if (!item) return;
+                addMessage(item.username || "User", item.message || "");
+            });
             break;
         }
 
