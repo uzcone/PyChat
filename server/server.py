@@ -5,8 +5,10 @@ import logging
 import os
 from datetime import datetime, timezone
 
+import asyncpg
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
+
 
 # =====================================
 # PYCHAT SERVER CONFIGURATION
@@ -15,15 +17,78 @@ from websockets.exceptions import ConnectionClosed
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 8765))
 
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
 MAX_USERNAME_LENGTH = 20
 MAX_MESSAGE_LENGTH = 1000
+HISTORY_LIMIT = 50
 
 clients = {}
+db_pool = None
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
+
+
+# =====================================
+# DATABASE
+# =====================================
+
+async def init_database():
+    global db_pool
+
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is missing")
+
+    db_pool = await asyncpg.create_pool(
+        dsn=DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        command_timeout=30
+    )
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id BIGSERIAL PRIMARY KEY,
+                username VARCHAR(20) NOT NULL,
+                message TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+
+    logging.info("PostgreSQL connected successfully")
+
+
+async def save_message(username, message):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO chat_messages
+                (username, message)
+            VALUES ($1, $2)
+            RETURNING id, created_at
+        """, username, message)
+
+    return row
+
+
+async def get_message_history():
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT username, message, created_at
+            FROM (
+                SELECT id, username, message, created_at
+                FROM chat_messages
+                ORDER BY id DESC
+                LIMIT $1
+            ) AS recent
+            ORDER BY id ASC
+        """, HISTORY_LIMIT)
+
+    return rows
+
 
 # =====================================
 # PROTOCOL
@@ -93,11 +158,13 @@ async def handle_client(ws):
                 ws.recv(), timeout=30
             )
             data = json.loads(raw)
+
         except asyncio.TimeoutError:
             await send_packet(
                 ws, "ERROR", message="JOIN timeout"
             )
             return
+
         except (json.JSONDecodeError, TypeError):
             await send_packet(
                 ws, "ERROR", message="Invalid JSON"
@@ -116,7 +183,6 @@ async def handle_client(ws):
             )
             return
 
-        # Validate username
         username = data.get("username", "")
 
         if not isinstance(username, str):
@@ -129,7 +195,8 @@ async def handle_client(ws):
 
         if not username or len(username) > MAX_USERNAME_LENGTH:
             await send_packet(
-                ws, "ERROR",
+                ws,
+                "ERROR",
                 message="Username must be 1-20 characters"
             )
             return
@@ -139,7 +206,8 @@ async def handle_client(ws):
             name.casefold() for name in clients.values()
         ]:
             await send_packet(
-                ws, "ERROR",
+                ws,
+                "ERROR",
                 message="Username already exists"
             )
             return
@@ -156,6 +224,20 @@ async def handle_client(ws):
             message=f"Welcome to PyChat, {username}!"
         )
 
+        # Load previous messages
+        history = await get_message_history()
+
+        for item in history:
+            await send_packet(
+                ws,
+                "MESSAGE",
+                username=item["username"],
+                message=item["message"],
+                timestamp=item["created_at"].isoformat(
+                    timespec="seconds"
+                )
+            )
+
         await broadcast(
             "NOTICE",
             message=f"{username} joined the chat"
@@ -168,6 +250,7 @@ async def handle_client(ws):
 
             try:
                 data = json.loads(raw)
+
             except (json.JSONDecodeError, TypeError):
                 await send_packet(
                     ws, "ERROR", message="Invalid JSON"
@@ -188,7 +271,8 @@ async def handle_client(ws):
 
                 if not isinstance(message, str):
                     await send_packet(
-                        ws, "ERROR",
+                        ws,
+                        "ERROR",
                         message="Message must be text"
                     )
                     continue
@@ -200,8 +284,27 @@ async def handle_client(ws):
 
                 if len(message) > MAX_MESSAGE_LENGTH:
                     await send_packet(
-                        ws, "ERROR",
+                        ws,
+                        "ERROR",
                         message="Message is too long"
+                    )
+                    continue
+
+                # Save message to PostgreSQL
+                try:
+                    saved = await save_message(
+                        username, message
+                    )
+
+                except Exception:
+                    logging.exception(
+                        "Message database save failed"
+                    )
+
+                    await send_packet(
+                        ws,
+                        "ERROR",
+                        message="Message could not be saved"
                     )
                     continue
 
@@ -209,10 +312,14 @@ async def handle_client(ws):
                     "[%s]: %s", username, message
                 )
 
+                # Broadcast saved message
                 await broadcast(
                     "MESSAGE",
                     username=username,
-                    message=message
+                    message=message,
+                    timestamp=saved["created_at"].isoformat(
+                        timespec="seconds"
+                    )
                 )
 
             elif packet_type == "USERS":
@@ -235,7 +342,8 @@ async def handle_client(ws):
 
             else:
                 await send_packet(
-                    ws, "ERROR",
+                    ws,
+                    "ERROR",
                     message="Unknown packet type"
                 )
 
@@ -268,6 +376,8 @@ async def handle_client(ws):
 async def main():
     logging.info("Starting PyChat Server...")
 
+    await init_database()
+
     async with serve(
         handle_client,
         HOST,
@@ -286,5 +396,6 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+
     except KeyboardInterrupt:
         logging.info("Server stopped")
