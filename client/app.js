@@ -4,14 +4,12 @@
 // =====================================
 // PYCHAT — TOKEN SESSION CLIENT
 // 30-DAY SESSION + AUTO RESUME
+// ONLINE USERS UPDATE
 // =====================================
 
 const SERVER_URL = "wss://pychat-8gdk.onrender.com";
 
-// Eski versiyada parol saqlangan kalit
 const STORAGE_KEY = "pychat_saved_account";
-
-// Yangi versiyada token saqlanadigan kalit
 const SESSION_STORAGE_KEY = "pychat_saved_session";
 
 let socket = null;
@@ -67,6 +65,10 @@ const sendButton = document.getElementById("sendButton");
 
 const userList = document.getElementById("userList");
 const userCount = document.getElementById("userCount");
+
+// Yuqoridagi online users qismi
+const topOnlineUsers = document.getElementById("topOnlineUsers");
+const topOnlineCount = document.getElementById("topOnlineCount");
 
 const statusDot = document.getElementById("statusDot");
 const connectionStatus = document.getElementById("connectionStatus");
@@ -175,10 +177,11 @@ function showLogin() {
         messages.appendChild(empty);
     }
 
-    if (userList) userList.replaceChildren();
-    if (conversationList) conversationList.replaceChildren();
+    clearOnlineUsers();
 
-    if (userCount) userCount.textContent = "0";
+    if (conversationList) {
+        conversationList.replaceChildren();
+    }
 }
 
 
@@ -251,7 +254,6 @@ function saveSession(token, savedUsername, expiresAt) {
         sessionExpiresAt = expiresAt || null;
         username = session.username;
 
-        // Eski parol saqlangan yozuvni o'chirish
         localStorage.removeItem(STORAGE_KEY);
 
         legacyCredentials = null;
@@ -325,6 +327,26 @@ function removeSavedSession() {
 
 
 // =====================================
+// REQUEST ONLINE USERS
+// =====================================
+
+function requestOnlineUsers() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        console.log("Cannot request users: socket is not open.");
+        return;
+    }
+
+    if (!joined) return;
+
+    socket.send(JSON.stringify({
+        type: "USERS"
+    }));
+
+    console.log("Online users requested.");
+}
+
+
+// =====================================
 // CONNECT TO SERVER
 // =====================================
 
@@ -382,12 +404,10 @@ function connectAndAuthenticate(type, data) {
         ws.onopen = () => {
             setStatus(false, "Authenticating...");
 
-            const packet = {
+            ws.send(JSON.stringify({
                 type: type,
                 ...data
-            };
-
-            ws.send(JSON.stringify(packet));
+            }));
         };
 
         ws.onmessage = (event) => {
@@ -428,6 +448,7 @@ function connectAndAuthenticate(type, data) {
             if (autoLoginEnabled && !manualDisconnect) {
                 setStatus(false, "Reconnecting...");
                 scheduleReconnect();
+
             } else if (!autoLoginEnabled && !manualDisconnect) {
                 if (loginError) {
                     loginError.textContent =
@@ -533,7 +554,6 @@ function handlePacket(packet, onSuccess, onError) {
 
             username = packet.username || username;
 
-            // Serverdan kelgan tokenni saqlash
             if (packet.token) {
                 saveSession(
                     packet.token,
@@ -542,7 +562,9 @@ function handlePacket(packet, onSuccess, onError) {
                 );
             }
 
-            autoLoginEnabled = Boolean(sessionToken || autoLoginEnabled);
+            autoLoginEnabled = Boolean(
+                sessionToken || autoLoginEnabled
+            );
 
             setStatus(true, "Connected");
             updateSendAvailability();
@@ -573,6 +595,9 @@ function handlePacket(packet, onSuccess, onError) {
             }
 
             addNotice(packet.message || "Welcome to PyChat!");
+
+            // Muhim: login tugagach online usersni so'rash
+            requestOnlineUsers();
 
             if (typeof onSuccess === "function") {
                 onSuccess();
@@ -617,14 +642,10 @@ function handlePacket(packet, onSuccess, onError) {
                 ? packet.users
                 : [];
 
-            updateUsers(users);
+            console.log("SERVER ONLINE USERS:", users);
+            console.log("SERVER ONLINE COUNT:", packet.count);
 
-            if (userCount) {
-                userCount.textContent = String(
-                    packet.count ?? users.length
-                );
-            }
-
+            updateUsers(users, packet.count);
             break;
         }
 
@@ -797,7 +818,6 @@ async function automaticLogin() {
         sessionExpiresAt = savedSession.expires_at;
         username = savedSession.username;
 
-        // Chat oynasini darhol ko'rsatish
         showChatImmediately(username);
 
     } else {
@@ -812,21 +832,20 @@ async function automaticLogin() {
             await authenticateWithSession();
 
         } else {
-            // Eski versiyadagi parol orqali bir martalik login.
-            // Server token qaytarsa, WELCOME uni yangi kalitga saqlaydi.
             await authenticateWithLegacyAccount();
         }
 
         reconnectAttempts = 0;
 
     } catch (error) {
-        console.log("Automatic authentication failed:", error.message);
+        console.log(
+            "Automatic authentication failed:",
+            error.message
+        );
 
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
 
-        // Token yaroqsiz yoki muddati tugagan bo'lsa,
-        // login oynasiga qaytamiz.
         if (savedSession) {
             removeSavedSession();
             showLogin();
@@ -941,34 +960,108 @@ function addNotice(text) {
 // ONLINE USERS
 // =====================================
 
-function updateUsers(users) {
-    if (!userList) return;
+function createOnlineUserElement(name, compact = false) {
+    const item = document.createElement(
+        compact ? "div" : "li"
+    );
 
-    userList.replaceChildren();
+    item.className = compact
+        ? "online-user-chip"
+        : "online-user-item";
 
-    users.forEach((user) => {
-        const name = typeof user === "string"
-            ? user
-            : user?.username;
+    const avatar = document.createElement("div");
 
-        if (!name) return;
+    avatar.className = compact
+        ? "user-avatar online-user-avatar"
+        : "user-avatar";
 
-        const li = document.createElement("li");
+    avatar.textContent = name.charAt(0).toUpperCase();
 
-        const avatar = document.createElement("div");
-        avatar.className = "user-avatar";
-        avatar.textContent = name.charAt(0).toUpperCase();
+    const label = document.createElement("span");
 
-        const label = document.createElement("span");
-        label.textContent = name;
+    label.className = compact
+        ? "online-user-name"
+        : "online-user-label";
 
-        const indicator = document.createElement("span");
-        indicator.className = "online-indicator";
+    label.textContent = name;
 
-        li.append(avatar, label, indicator);
+    const indicator = document.createElement("span");
+    indicator.className = "online-indicator";
 
-        userList.appendChild(li);
-    });
+    item.append(avatar, label, indicator);
+
+    return item;
+}
+
+function updateUsers(users, serverCount) {
+    const validUsers = users
+        .map((user) => {
+            if (typeof user === "string") {
+                return user;
+            }
+
+            return user?.username || "";
+        })
+        .filter((name) => typeof name === "string" && name.length > 0);
+
+    // Takroriy username'larni olib tashlash
+    const uniqueUsers = [...new Set(validUsers)];
+
+    const count = Number.isFinite(Number(serverCount))
+        ? Number(serverCount)
+        : uniqueUsers.length;
+
+    // Sidebar ro'yxati
+    if (userList) {
+        userList.replaceChildren();
+
+        uniqueUsers.forEach((name) => {
+            userList.appendChild(
+                createOnlineUserElement(name, false)
+            );
+        });
+    }
+
+    // Yuqoridagi online users qismi
+    if (topOnlineUsers) {
+        topOnlineUsers.replaceChildren();
+
+        uniqueUsers.forEach((name) => {
+            topOnlineUsers.appendChild(
+                createOnlineUserElement(name, true)
+            );
+        });
+    }
+
+    // Online sonini yangilash
+    if (userCount) {
+        userCount.textContent = String(count);
+    }
+
+    if (topOnlineCount) {
+        topOnlineCount.textContent = String(count);
+    }
+
+    console.log("ONLINE USERS UPDATED:", uniqueUsers);
+    console.log("ONLINE TOTAL:", count);
+}
+
+function clearOnlineUsers() {
+    if (userList) {
+        userList.replaceChildren();
+    }
+
+    if (topOnlineUsers) {
+        topOnlineUsers.replaceChildren();
+    }
+
+    if (userCount) {
+        userCount.textContent = "0";
+    }
+
+    if (topOnlineCount) {
+        topOnlineCount.textContent = "0";
+    }
 }
 
 
@@ -1080,7 +1173,6 @@ function logout() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
 
-    // Serverdagi 30 kunlik sessiyani bekor qilish
     if (socket && socket.readyState === WebSocket.OPEN) {
         try {
             socket.send(JSON.stringify({
