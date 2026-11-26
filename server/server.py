@@ -1,10 +1,12 @@
 
 import asyncio
 import asyncpg
+import base64
 import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import websockets
 
@@ -39,6 +41,17 @@ def utc_now():
 
 def create_packet(packet_type, **kwargs):
     return {"type": packet_type, **kwargs}
+
+
+def field_value(record, key, default=""):
+    if record is None:
+        return default
+
+    try:
+        value = record[key]
+        return default if value is None else value
+    except (KeyError, TypeError, IndexError):
+        return default
 
 
 async def send_json(websocket, data):
@@ -79,32 +92,44 @@ def verify_password(password, salt, stored_hash):
     if not stored_hash:
         return False
 
+    password_bytes = password.encode("utf-8")
     stored_hash = str(stored_hash).strip()
 
-    # Current PyChat PBKDF2 format
+    # 1. Current PyChat PBKDF2
     if salt:
-        _, calculated = hash_password(password, salt)
+        try:
+            _, calculated = hash_password(
+                password,
+                str(salt)
+            )
 
-        if hmac.compare_digest(
-            calculated.lower(),
-            stored_hash.lower()
-        ):
-            return True
+            if hmac.compare_digest(
+                calculated.lower(),
+                stored_hash.lower()
+            ):
+                return True
 
-    # Encoded PBKDF2 formats
+        except Exception as error:
+            print("CURRENT HASH CHECK ERROR:", repr(error))
+
+    # 2. Django PBKDF2 format
     if stored_hash.startswith("pbkdf2_sha256$"):
         try:
-            import base64
-
             parts = stored_hash.split("$")
+
+            if len(parts) != 4:
+                return False
 
             iterations = int(parts[1])
             encoded_salt = parts[2]
-            expected = base64.b64decode(parts[3])
+            expected = base64.b64decode(
+                parts[3],
+                validate=True
+            )
 
             calculated = hashlib.pbkdf2_hmac(
                 "sha256",
-                password.encode("utf-8"),
+                password_bytes,
                 encoded_salt.encode("utf-8"),
                 iterations
             )
@@ -113,49 +138,123 @@ def verify_password(password, salt, stored_hash):
                 calculated,
                 expected
             )
-        except Exception:
+
+        except Exception as error:
+            print("PBKDF2 LEGACY CHECK ERROR:", repr(error))
             return False
 
-    # Common unsalted legacy formats
-    legacy_algorithms = {
+    # 3. Common unsalted legacy hashes
+    algorithms = {
         32: "md5",
         40: "sha1",
         64: "sha256",
         128: "sha512"
     }
 
-    algorithm = legacy_algorithms.get(len(stored_hash))
+    if re.fullmatch(r"[0-9a-fA-F]+", stored_hash):
+        algorithm = algorithms.get(len(stored_hash))
 
-    if algorithm:
-        try:
-            calculated = hashlib.new(
-                algorithm,
-                password.encode("utf-8")
-            ).hexdigest()
+        if algorithm:
+            try:
+                calculated = hashlib.new(
+                    algorithm,
+                    password_bytes
+                ).hexdigest()
 
-            if hmac.compare_digest(
-                calculated.lower(),
-                stored_hash.lower()
-            ):
-                return True
-        except Exception:
-            pass
+                if hmac.compare_digest(
+                    calculated.lower(),
+                    stored_hash.lower()
+                ):
+                    return True
 
-    # Optional bcrypt support if installed
+            except Exception as error:
+                print("LEGACY HASH CHECK ERROR:", repr(error))
+
+    # 4. Salted SHA / MD5 formats:
+    # algorithm$salt$hash
+    parts = stored_hash.split("$")
+
+    if len(parts) == 3:
+        algorithm, encoded_salt, expected = parts
+
+        if algorithm.lower() in (
+            "md5",
+            "sha1",
+            "sha256",
+            "sha512"
+        ):
+            try:
+                algorithm = algorithm.lower()
+
+                candidates = [
+                    encoded_salt + password,
+                    password + encoded_salt
+                ]
+
+                for candidate in candidates:
+                    calculated = hashlib.new(
+                        algorithm,
+                        candidate.encode("utf-8")
+                    ).hexdigest()
+
+                    if hmac.compare_digest(
+                        calculated.lower(),
+                        expected.lower()
+                    ):
+                        return True
+
+            except Exception as error:
+                print("SALTED HASH CHECK ERROR:", repr(error))
+
+    # 5. Optional bcrypt support
     if stored_hash.startswith(("$2a$", "$2b$", "$2y$")):
         try:
             import bcrypt
 
             return bcrypt.checkpw(
-                password.encode("utf-8"),
+                password_bytes,
                 stored_hash.encode("utf-8")
             )
+
         except ImportError:
             print("BCRYPT SUPPORT NOT INSTALLED")
-        except Exception:
-            pass
+        except Exception as error:
+            print("BCRYPT CHECK ERROR:", repr(error))
 
     return False
+
+
+def is_current_password_hash(password, salt, stored_hash):
+    if not salt or not stored_hash:
+        return False
+
+    _, calculated = hash_password(
+        password,
+        str(salt)
+    )
+
+    return hmac.compare_digest(
+        calculated.lower(),
+        str(stored_hash).lower()
+    )
+
+
+async def upgrade_password_hash(user_id, password):
+    salt, new_hash = hash_password(password)
+
+    async with db_pool.acquire() as connection:
+        await connection.execute("""
+            UPDATE users
+            SET password_salt = $1,
+                password_hash = $2
+            WHERE id = $3
+        """,
+            salt,
+            new_hash,
+            user_id
+        )
+
+    print("PASSWORD HASH UPGRADED FOR USER ID:", user_id)
 
 
 # =========================================
@@ -252,6 +351,7 @@ async def init_database():
                 id SERIAL PRIMARY KEY,
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
+                password_salt TEXT,
                 avatar_type TEXT DEFAULT '',
                 avatar_value TEXT DEFAULT '',
                 avatar TEXT DEFAULT '',
@@ -343,6 +443,34 @@ async def init_database():
         print("EXISTING USERS:", user_count)
         print("EXISTING MESSAGES:", message_count)
 
+        # Safe password format summary.
+        # Never print actual password hashes.
+        formats = await connection.fetch("""
+            SELECT
+                LENGTH(password_hash) AS hash_length,
+                CASE
+                    WHEN password_hash LIKE 'pbkdf2_sha256$%'
+                        THEN 'django_pbkdf2'
+                    WHEN password_hash LIKE '$2%'
+                        THEN 'bcrypt'
+                    WHEN password_hash ~ '^[0-9a-fA-F]+$'
+                        THEN 'hex_hash'
+                    ELSE 'other'
+                END AS hash_format,
+                CASE
+                    WHEN password_salt IS NULL OR password_salt = ''
+                        THEN 'no_salt'
+                    ELSE 'has_salt'
+                END AS salt_status,
+                COUNT(*) AS total
+            FROM users
+            GROUP BY 1, 2, 3
+            ORDER BY total DESC
+        """)
+
+        for row in formats:
+            print("PASSWORD FORMAT SUMMARY:", dict(row))
+
     print("DATABASE INITIALIZED SUCCESSFULLY")
 
 
@@ -355,8 +483,8 @@ def get_avatar(user):
         return ""
 
     return (
-        user.get("avatar")
-        or user.get("avatar_value")
+        field_value(user, "avatar")
+        or field_value(user, "avatar_value")
         or ""
     )
 
@@ -673,12 +801,12 @@ async def finish_authentication(
     token_hash,
     expires_at
 ):
-    username = user["username"]
+    username = field_value(user, "username")
 
     await register_connection(
         websocket,
         username,
-        user["id"],
+        field_value(user, "id"),
         token_hash
     )
 
@@ -686,12 +814,12 @@ async def finish_authentication(
         websocket,
         "WELCOME",
         username=username,
-        user_id=user["id"],
+        user_id=field_value(user, "id"),
         token=token,
         expires_at=expires_at.isoformat(),
         avatar=get_avatar(user),
-        avatar_type=user.get("avatar_type") or "",
-        avatar_value=user.get("avatar_value") or ""
+        avatar_type=field_value(user, "avatar_type"),
+        avatar_value=field_value(user, "avatar_value")
     )
 
     if not sent:
@@ -790,21 +918,54 @@ async def authenticate_connection(websocket):
             user = await get_user(username)
 
             if not user:
+                print("LOGIN FAILED: USER NOT FOUND")
+
                 await send_packet(
                     websocket,
                     "ERROR",
                     message="Invalid username or password."
                 )
                 return None
+
+            stored_salt = field_value(
+                user,
+                "password_salt",
+                None
+            )
+
+            stored_hash = field_value(
+                user,
+                "password_hash",
+                None
+            )
 
             valid = verify_password(
                 password,
-                user["password_salt"],
-                user["password_hash"]
+                stored_salt,
+                stored_hash
             )
 
             if not valid:
-                print("LOGIN FAILED: PASSWORD FORMAT OR PASSWORD MISMATCH:", username)
+                # Only safe metadata is logged.
+                hash_text = str(stored_hash or "")
+
+                print(
+                    "LOGIN FAILED:",
+                    {
+                        "user_found": True,
+                        "hash_length": len(hash_text),
+                        "hash_is_hex": bool(
+                            re.fullmatch(
+                                r"[0-9a-fA-F]+",
+                                hash_text
+                            )
+                        ),
+                        "hash_has_separator": "$" in hash_text,
+                        "salt_exists": bool(stored_salt),
+                        "salt_length": len(str(stored_salt))
+                        if stored_salt else 0
+                    }
+                )
 
                 await send_packet(
                     websocket,
@@ -813,21 +974,17 @@ async def authenticate_connection(websocket):
                 )
                 return None
 
-            # Upgrade a supported legacy hash to current PBKDF2
-            if not user["password_salt"]:
-                salt, new_hash = hash_password(password)
-
-                async with db_pool.acquire() as connection:
-                    await connection.execute("""
-                        UPDATE users
-                        SET password_salt = $1,
-                            password_hash = $2
-                        WHERE id = $3
-                    """,
-                        salt,
-                        new_hash,
-                        user["id"]
-                    )
+            # Upgrade every successfully verified legacy hash.
+            # Current hashes are left unchanged.
+            if not is_current_password_hash(
+                password,
+                stored_salt,
+                stored_hash
+            ):
+                await upgrade_password_hash(
+                    user["id"],
+                    password
+                )
 
                 user = await get_user(username)
 
