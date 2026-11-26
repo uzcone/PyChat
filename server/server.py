@@ -20,6 +20,8 @@ PORT = int(os.environ.get("PORT", 8765))
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+print("DATABASE URL EXISTS:", bool(DATABASE_URL))
+
 SESSION_DAYS = 30
 PBKDF2_ITERATIONS = 310000
 
@@ -889,12 +891,22 @@ async def handle_client(websocket):
 # SERVER START
 # =========================================
 
+
 async def main():
-
-    await init_database()
-
     print("================================")
     print("PYCHAT SERVER STARTING")
+    print("DATABASE URL EXISTS:", bool(DATABASE_URL))
+    print("================================")
+
+    try:
+        await init_database()
+        print("DATABASE INITIALIZED SUCCESSFULLY")
+
+    except Exception as error:
+        print("DATABASE INITIALIZATION FAILED:", repr(error))
+        raise
+
+    print("================================")
     print("HOST:", HOST)
     print("PORT:", PORT)
     print("SESSION DAYS:", SESSION_DAYS)
@@ -909,8 +921,8 @@ async def main():
         ping_timeout=20
     ):
         print("PYCHAT SERVER IS RUNNING")
-
         await asyncio.Future()
+
 
 
 if __name__ == "__main__":
