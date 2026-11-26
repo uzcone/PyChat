@@ -1,563 +1,896 @@
 
-import os
-import json
 import asyncio
-import hashlib
-import secrets
-import re
-
 import asyncpg
-from websockets.asyncio.server import serve
-from websockets.exceptions import ConnectionClosed
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import websockets
+
+from datetime import datetime, timedelta, timezone
 
 
-# =====================================
+# =========================================
 # PYCHAT SERVER CONFIGURATION
-# =====================================
+# =========================================
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 8765))
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
+SESSION_DAYS = 30
+PBKDF2_ITERATIONS = 310000
+
+clients = {}
+clients_lock = asyncio.Lock()
 
 db_pool = None
 
-# Active connections:
-# {username: {"websocket": websocket, "id": user_id}}
 
-clients = {}
+# =========================================
+# PACKET HELPERS
+# =========================================
 
-clients_lock = asyncio.Lock()
+def create_packet(packet_type, **data):
+    return {
+        "type": packet_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **data
+    }
 
 
-# =====================================
-# PASSWORD SECURITY
-# =====================================
+async def send_packet(websocket, packet_type, **data):
+    try:
+        packet = create_packet(packet_type, **data)
+        await websocket.send(json.dumps(packet))
+    except Exception:
+        pass
+
+
+# =========================================
+# PASSWORD HASHING
+# =========================================
 
 def hash_password(password):
-    salt = secrets.token_bytes(16)
+    salt = secrets.token_hex(16)
 
-    hashed = hashlib.pbkdf2_hmac(
+    password_hash = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
-        salt,
-        310000
-    )
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS
+    ).hex()
 
-    return salt.hex() + "$" + hashed.hex()
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${password_hash}"
 
 
 def verify_password(password, stored_hash):
     try:
-        salt_hex, hash_hex = stored_hash.split("$")
-        salt = bytes.fromhex(salt_hex)
+        # New format:
+        # pbkdf2_sha256$iterations$salt$hash
 
-        new_hash = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            salt,
-            310000
-        )
+        if stored_hash.startswith("pbkdf2_sha256$"):
+            parts = stored_hash.split("$")
 
-        return secrets.compare_digest(
-            new_hash.hex(),
-            hash_hex
-        )
+            iterations = int(parts[1])
+            salt = parts[2]
+            expected_hash = parts[3]
 
-    except (ValueError, TypeError):
+            actual_hash = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt.encode("utf-8"),
+                iterations
+            ).hex()
+
+            return hmac.compare_digest(
+                actual_hash,
+                expected_hash
+            )
+
+        # Older format:
+        # salt:hash
+
+        if ":" in stored_hash:
+            salt, expected_hash = stored_hash.split(":", 1)
+
+            actual_hash = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt.encode("utf-8"),
+                100000
+            ).hex()
+
+            return hmac.compare_digest(
+                actual_hash,
+                expected_hash
+            )
+
+        return False
+
+    except Exception:
         return False
 
 
-# =====================================
+# =========================================
+# SESSION HELPERS
+# =========================================
+
+def create_session_token():
+    return secrets.token_urlsafe(32)
+
+
+def hash_session_token(token):
+    return hashlib.sha256(
+        token.encode("utf-8")
+    ).hexdigest()
+
+
+async def create_session(user_id):
+    token = create_session_token()
+    token_hash = hash_session_token(token)
+
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        days=SESSION_DAYS
+    )
+
+    async with db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO sessions (
+                user_id,
+                token_hash,
+                expires_at
+            )
+            VALUES ($1, $2, $3)
+            """,
+            user_id,
+            token_hash,
+            expires_at
+        )
+
+    return token, expires_at
+
+
+async def validate_session(token):
+    if not token or not isinstance(token, str):
+        return None
+
+    token_hash = hash_session_token(token)
+
+    async with db_pool.acquire() as connection:
+        session = await connection.fetchrow(
+            """
+            SELECT
+                sessions.user_id,
+                sessions.expires_at,
+                users.username,
+                users.avatar_type,
+                users.avatar_value
+            FROM sessions
+            JOIN users
+                ON users.id = sessions.user_id
+            WHERE sessions.token_hash = $1
+              AND sessions.expires_at > NOW()
+            """,
+            token_hash
+        )
+
+    return session
+
+
+async def revoke_session(token):
+    if not token:
+        return
+
+    token_hash = hash_session_token(token)
+
+    async with db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            DELETE FROM sessions
+            WHERE token_hash = $1
+            """,
+            token_hash
+        )
+
+
+# =========================================
 # DATABASE INITIALIZATION
-# =====================================
+# =========================================
 
 async def init_database():
     global db_pool
 
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is missing!")
+        raise RuntimeError(
+            "DATABASE_URL environment variable is missing."
+        )
 
     db_pool = await asyncpg.create_pool(
-        dsn=DATABASE_URL,
+        DATABASE_URL,
         min_size=1,
-        max_size=5,
-        command_timeout=30
+        max_size=10
     )
 
     async with db_pool.acquire() as connection:
 
-        await connection.execute("""
+        # USERS TABLE
+
+        await connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS users (
                 id BIGSERIAL PRIMARY KEY,
-                username VARCHAR(30) NOT NULL UNIQUE,
+                username VARCHAR(20) UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
-                avatar_type VARCHAR(20) DEFAULT 'preset',
-                avatar_value TEXT DEFAULT 'avatar-1',
+                avatar_type TEXT DEFAULT 'default',
+                avatar_value TEXT DEFAULT '',
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
+            )
+            """
+        )
 
-        await connection.execute("""
+        # MESSAGES TABLE
+
+        await connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS messages (
                 id BIGSERIAL PRIMARY KEY,
-                sender_id BIGINT NOT NULL
-                    REFERENCES users(id),
-                recipient_id BIGINT
-                    REFERENCES users(id),
+                sender_id BIGINT REFERENCES users(id)
+                    ON DELETE CASCADE,
+                recipient_id BIGINT REFERENCES users(id)
+                    ON DELETE CASCADE,
                 content TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 read_at TIMESTAMPTZ
-            );
-        """)
+            )
+            """
+        )
 
-    print("PostgreSQL connected successfully.")
+        # SESSIONS TABLE
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL
+                    REFERENCES users(id)
+                    ON DELETE CASCADE,
+                token_hash TEXT UNIQUE NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            sessions_token_hash_idx
+            ON sessions(token_hash)
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            messages_created_at_idx
+            ON messages(created_at)
+            """
+        )
+
+    print("Database connected successfully.")
+    print("Users, messages and sessions tables are ready.")
 
 
-# =====================================
-# SEND PACKET
-# =====================================
+# =========================================
+# ONLINE USERS
+# =========================================
 
-async def send_packet(websocket, packet):
-    await websocket.send(
-        json.dumps(packet, ensure_ascii=False)
+async def online_users():
+    async with clients_lock:
+        return list(clients.keys())
+
+
+async def update_users():
+    users = await online_users()
+
+    packet = create_packet(
+        "USERS",
+        users=users,
+        count=len(users)
+    )
+
+    await broadcast_packet(packet)
+
+
+# =========================================
+# BROADCAST
+# =========================================
+
+async def broadcast_packet(packet):
+    async with clients_lock:
+        connections = [
+            client["websocket"]
+            for client in clients.values()
+        ]
+
+    if not connections:
+        return
+
+    message = json.dumps(packet)
+
+    await asyncio.gather(
+        *[
+            websocket.send(message)
+            for websocket in connections
+        ],
+        return_exceptions=True
     )
 
 
-# =====================================
-# AUTHENTICATION
-# =====================================
+async def broadcast_message(username, message):
+    packet = create_packet(
+        "MESSAGE",
+        username=username,
+        message=message
+    )
 
-async def authenticate(packet):
-
-    action = packet.get("type")
-
-    username = packet.get("username")
-    password = packet.get("password")
-
-    if not isinstance(username, str):
-        raise ValueError("Invalid username.")
-
-    if not isinstance(password, str):
-        raise ValueError("Invalid password.")
-
-    username = username.strip()
-
-    if not re.fullmatch(
-        r"[a-zA-Z0-9_]{3,30}",
-        username
-    ):
-        raise ValueError(
-            "Username must contain 3-30 letters, numbers or underscores."
-        )
-
-    if len(password) < 8 or len(password) > 128:
-        raise ValueError(
-            "Password must contain 8-128 characters."
-        )
-
-    async with db_pool.acquire() as connection:
-
-        # REGISTER
-        if action == "REGISTER":
-
-            password_hash = await asyncio.to_thread(
-                hash_password,
-                password
-            )
-
-            try:
-                user = await connection.fetchrow("""
-                    INSERT INTO users (
-                        username,
-                        password_hash
-                    )
-                    VALUES ($1, $2)
-                    RETURNING id, username
-                """, username, password_hash)
-
-                return user
-
-            except asyncpg.UniqueViolationError:
-                raise ValueError(
-                    "This username is already taken."
-                )
-
-        # LOGIN
-        elif action == "LOGIN":
-
-            user = await connection.fetchrow("""
-                SELECT id, username, password_hash
-                FROM users
-                WHERE username = $1
-            """, username)
-
-            if not user:
-                raise ValueError(
-                    "Incorrect username or password."
-                )
-
-            valid = await asyncio.to_thread(
-                verify_password,
-                password,
-                user["password_hash"]
-            )
-
-            if not valid:
-                raise ValueError(
-                    "Incorrect username or password."
-                )
-
-            return user
-
-        else:
-            raise ValueError(
-                "Unknown authentication request."
-            )
+    await broadcast_packet(packet)
 
 
-# =====================================
-# ONLINE USER MANAGEMENT
-# =====================================
+# =========================================
+# CONNECTION MANAGEMENT
+# =========================================
 
-async def register_connection(username, user_id, websocket):
-
+async def register_connection(
+    websocket,
+    username,
+    user_id,
+    token_hash
+):
     old_websocket = None
 
     async with clients_lock:
-
         old_client = clients.get(username)
 
         if old_client:
             old_websocket = old_client["websocket"]
 
         clients[username] = {
-            "id": user_id,
-            "websocket": websocket
+            "websocket": websocket,
+            "user_id": user_id,
+            "token_hash": token_hash
         }
 
-    # Close old connection AFTER replacing it.
-    # Its finally block will not remove the new connection.
-
-    if old_websocket and old_websocket is not websocket:
+    if old_websocket and old_websocket != websocket:
         try:
             await old_websocket.close(
                 code=4001,
-                reason="Account reconnected"
+                reason="New connection established."
             )
         except Exception:
             pass
 
 
-async def remove_connection(username, websocket):
-
+async def remove_connection(websocket, username):
     removed = False
 
     async with clients_lock:
+        current_client = clients.get(username)
 
-        current = clients.get(username)
-
-        # Only remove the connection if it is still
-        # the active connection for this username.
-
-        if current and current["websocket"] is websocket:
-            clients.pop(username, None)
+        if (
+            current_client
+            and current_client["websocket"] == websocket
+        ):
+            del clients[username]
             removed = True
 
-    return removed
+    if removed:
+        await update_users()
 
 
-async def get_online_users():
+# =========================================
+# MESSAGE HISTORY
+# =========================================
 
-    async with clients_lock:
-        return list(clients.keys())
-
-
-# =====================================
-# BROADCAST
-# =====================================
-
-async def broadcast_packet(packet):
-
-    async with clients_lock:
-        active_connections = [
-            (username, client["websocket"])
-            for username, client in clients.items()
-        ]
-
-    disconnected = []
-
-    for username, websocket in active_connections:
-
-        try:
-            await send_packet(websocket, packet)
-
-        except Exception:
-            disconnected.append((username, websocket))
-
-    for username, websocket in disconnected:
-        await remove_connection(username, websocket)
-
-
-async def broadcast_users():
-
-    users = await get_online_users()
-
-    await broadcast_packet({
-        "type": "USERS",
-        "users": users,
-        "count": len(users)
-    })
-
-
-# =====================================
-# MESSAGE DATABASE
-# =====================================
-
-async def save_message(user_id, message):
-
+async def send_history(websocket):
     async with db_pool.acquire() as connection:
-
-        await connection.execute("""
-            INSERT INTO messages (
-                sender_id,
-                content
-            )
-            VALUES ($1, $2)
-        """, user_id, message)
-
-
-async def get_recent_messages(limit=50):
-
-    async with db_pool.acquire() as connection:
-
-        rows = await connection.fetch("""
+        rows = await connection.fetch(
+            """
             SELECT
-                u.username,
-                m.content,
-                m.created_at
-            FROM messages m
-            JOIN users u
-                ON u.id = m.sender_id
-            WHERE m.recipient_id IS NULL
-            ORDER BY
-                m.created_at DESC,
-                m.id DESC
-            LIMIT $1
-        """, limit)
+                users.username,
+                messages.content,
+                messages.created_at
+            FROM messages
+            JOIN users
+                ON users.id = messages.sender_id
+            WHERE messages.recipient_id IS NULL
+            ORDER BY messages.created_at DESC
+            LIMIT 50
+            """
+        )
 
-    return [
-        {
+    rows = list(reversed(rows))
+
+    history = []
+
+    for row in rows:
+        history.append({
             "username": row["username"],
-            "message": row["content"]
-        }
-        for row in reversed(rows)
-    ]
+            "message": row["content"],
+            "timestamp": row["created_at"].isoformat()
+        })
+
+    await send_packet(
+        websocket,
+        "HISTORY",
+        messages=history
+    )
 
 
-# =====================================
-# HANDLE CLIENT
-# =====================================
+# =========================================
+# AUTHENTICATION
+# =========================================
 
-async def handle_client(websocket):
+async def authenticate_register(packet):
+    username = str(packet.get("username", "")).strip()
+    password = str(packet.get("password", ""))
 
-    user = None
-    username = None
-    registered = False
+    avatar_type = str(
+        packet.get("avatar_type", "default")
+    )
+
+    avatar_value = str(
+        packet.get("avatar_value", "")
+    )
+
+    if not username or not password:
+        return None, "Username and password are required."
+
+    if len(username) > 20:
+        return None, "Username must be 20 characters or less."
+
+    if len(password) < 6:
+        return None, "Password must contain at least 6 characters."
+
+    password_hash = hash_password(password)
 
     try:
+        async with db_pool.acquire() as connection:
+            user = await connection.fetchrow(
+                """
+                INSERT INTO users (
+                    username,
+                    password_hash,
+                    avatar_type,
+                    avatar_value
+                )
+                VALUES ($1, $2, $3, $4)
+                RETURNING
+                    id,
+                    username,
+                    avatar_type,
+                    avatar_value
+                """,
+                username,
+                password_hash,
+                avatar_type,
+                avatar_value
+            )
 
-        # FIRST PACKET: LOGIN OR REGISTER
+        return user, None
 
+    except asyncpg.UniqueViolationError:
+        return None, "This username is already taken."
+
+    except Exception as error:
+        print("REGISTER ERROR:", error)
+        return None, "Registration failed. Please try again."
+
+
+async def authenticate_login(packet):
+    username = str(packet.get("username", "")).strip()
+    password = str(packet.get("password", ""))
+
+    if not username or not password:
+        return None, "Username and password are required."
+
+    async with db_pool.acquire() as connection:
+        user = await connection.fetchrow(
+            """
+            SELECT
+                id,
+                username,
+                password_hash,
+                avatar_type,
+                avatar_value
+            FROM users
+            WHERE username = $1
+            """,
+            username
+        )
+
+    if not user:
+        return None, "Incorrect username or password."
+
+    if not verify_password(password, user["password_hash"]):
+        return None, "Incorrect username or password."
+
+    return user, None
+
+
+# =========================================
+# COMPLETE AUTHENTICATION
+# =========================================
+
+async def finish_authentication(
+    websocket,
+    user,
+    token,
+    expires_at
+):
+    username = user["username"]
+    user_id = user["id"]
+
+    token_hash = hash_session_token(token)
+
+    await register_connection(
+        websocket,
+        username,
+        user_id,
+        token_hash
+    )
+
+    await send_packet(
+        websocket,
+        "WELCOME",
+        username=username,
+        message="Successfully connected to PyChat.",
+        token=token,
+        expires_at=expires_at.isoformat(),
+        avatar_type=user.get("avatar_type", "default"),
+        avatar_value=user.get("avatar_value", "")
+    )
+
+    await send_history(websocket)
+    await update_users()
+
+    return username
+
+
+# =========================================
+# AUTHENTICATION HANDSHAKE
+# =========================================
+
+async def authenticate_connection(websocket):
+    try:
         raw_packet = await asyncio.wait_for(
             websocket.recv(),
-            timeout=60
+            timeout=30
         )
 
         packet = json.loads(raw_packet)
 
         if not isinstance(packet, dict):
-            raise ValueError("Invalid authentication request.")
+            await send_packet(
+                websocket,
+                "ERROR",
+                message="Invalid request."
+            )
+            return None
 
-        user = await authenticate(packet)
+        packet_type = packet.get("type")
 
-        username = user["username"]
+        # REGISTER
 
-        # Register or replace an existing connection.
-        await register_connection(
-            username,
-            user["id"],
-            websocket
+        if packet_type == "REGISTER":
+            user, error = await authenticate_register(packet)
+
+            if error:
+                await send_packet(
+                    websocket,
+                    "ERROR",
+                    message=error
+                )
+                return None
+
+            token, expires_at = await create_session(user["id"])
+
+            return await finish_authentication(
+                websocket,
+                user,
+                token,
+                expires_at
+            )
+
+        # LOGIN
+
+        if packet_type == "LOGIN":
+            user, error = await authenticate_login(packet)
+
+            if error:
+                await send_packet(
+                    websocket,
+                    "ERROR",
+                    message=error
+                )
+                return None
+
+            token, expires_at = await create_session(user["id"])
+
+            return await finish_authentication(
+                websocket,
+                user,
+                token,
+                expires_at
+            )
+
+        # RESUME EXISTING SESSION
+
+        if packet_type == "RESUME":
+            token = packet.get("token")
+
+            session = await validate_session(token)
+
+            if not session:
+                await send_packet(
+                    websocket,
+                    "ERROR",
+                    code="SESSION_INVALID",
+                    message="Your session has expired. Please sign in again."
+                )
+                return None
+
+            user = {
+                "id": session["user_id"],
+                "username": session["username"],
+                "avatar_type": session["avatar_type"],
+                "avatar_value": session["avatar_value"]
+            }
+
+            return await finish_authentication(
+                websocket,
+                user,
+                token,
+                session["expires_at"]
+            )
+
+        await send_packet(
+            websocket,
+            "ERROR",
+            message="Please sign in first."
         )
 
-        registered = True
+        return None
 
-        print(username, "connected.")
+    except asyncio.TimeoutError:
+        await send_packet(
+            websocket,
+            "ERROR",
+            message="Authentication timed out."
+        )
+        return None
 
-        # WELCOME
+    except json.JSONDecodeError:
+        await send_packet(
+            websocket,
+            "ERROR",
+            message="Invalid JSON request."
+        )
+        return None
 
-        await send_packet(websocket, {
-            "type": "WELCOME",
-            "username": username,
-            "message": "Welcome to PyChat, " + username + "!"
-        })
+    except Exception as error:
+        print("AUTHENTICATION ERROR:", error)
 
-        # MESSAGE HISTORY
+        await send_packet(
+            websocket,
+            "ERROR",
+            message="Authentication failed."
+        )
 
-        history = await get_recent_messages(limit=50)
+        return None
 
-        await send_packet(websocket, {
-            "type": "HISTORY",
-            "messages": history
-        })
 
-        # JOIN NOTICE
+# =========================================
+# CLIENT HANDLER
+# =========================================
 
-        await broadcast_packet({
-            "type": "NOTICE",
-            "message": username + " joined PyChat."
-        })
+async def handle_client(websocket):
+    username = None
 
-        await broadcast_users()
+    try:
+        username = await authenticate_connection(websocket)
 
-        # =================================
-        # MAIN MESSAGE LOOP
-        # =================================
+        if not username:
+            return
+
+        print(f"{username} connected.")
 
         async for raw_message in websocket:
-
             try:
                 packet = json.loads(raw_message)
 
+                if not isinstance(packet, dict):
+                    continue
+
+                packet_type = packet.get("type")
+
+                # SEND MESSAGE
+
+                if packet_type == "MESSAGE":
+                    message = str(
+                        packet.get("message", "")
+                    ).strip()
+
+                    if not message:
+                        continue
+
+                    if len(message) > 1000:
+                        await send_packet(
+                            websocket,
+                            "ERROR",
+                            message="Message is too long."
+                        )
+                        continue
+
+                    async with clients_lock:
+                        client = clients.get(username)
+
+                        if (
+                            not client
+                            or client["websocket"] != websocket
+                        ):
+                            continue
+
+                        user_id = client["user_id"]
+
+                    async with db_pool.acquire() as connection:
+                        await connection.execute(
+                            """
+                            INSERT INTO messages (
+                                sender_id,
+                                recipient_id,
+                                content
+                            )
+                            VALUES ($1, NULL, $2)
+                            """,
+                            user_id,
+                            message
+                        )
+
+                    await broadcast_message(
+                        username,
+                        message
+                    )
+
+                # PING
+
+                elif packet_type == "PING":
+                    await send_packet(
+                        websocket,
+                        "PONG"
+                    )
+
+                # USERS
+
+                elif packet_type == "USERS":
+                    users = await online_users()
+
+                    await send_packet(
+                        websocket,
+                        "USERS",
+                        users=users,
+                        count=len(users)
+                    )
+
+                # LEAVE CONNECTION
+                # This does NOT delete the session.
+
+                elif packet_type == "LEAVE":
+                    await websocket.close()
+                    break
+
+                # LOGOUT
+                # This revokes the session.
+
+                elif packet_type == "LOGOUT":
+                    async with clients_lock:
+                        client = clients.get(username)
+
+                        token_hash = None
+
+                        if (
+                            client
+                            and client["websocket"] == websocket
+                        ):
+                            token_hash = client["token_hash"]
+
+                    if token_hash:
+                        async with db_pool.acquire() as connection:
+                            await connection.execute(
+                                """
+                                DELETE FROM sessions
+                                WHERE token_hash = $1
+                                """,
+                                token_hash
+                            )
+
+                    await send_packet(
+                        websocket,
+                        "NOTICE",
+                        message="You have been signed out."
+                    )
+
+                    await websocket.close()
+                    break
+
             except json.JSONDecodeError:
-                continue
-
-            if not isinstance(packet, dict):
-                continue
-
-            packet_type = packet.get("type")
-
-            # SEND MESSAGE
-
-            if packet_type == "MESSAGE":
-
-                message = packet.get("message", "")
-
-                if not isinstance(message, str):
-                    continue
-
-                message = message.strip()
-
-                if not message or len(message) > 1000:
-                    continue
-
-                await save_message(
-                    user["id"],
-                    message
+                await send_packet(
+                    websocket,
+                    "ERROR",
+                    message="Invalid message format."
                 )
 
-                await broadcast_packet({
-                    "type": "MESSAGE",
-                    "username": username,
-                    "message": message
-                })
+            except Exception as error:
+                print("MESSAGE ERROR:", error)
 
-            # PING
+                await send_packet(
+                    websocket,
+                    "ERROR",
+                    message="Unable to process your request."
+                )
 
-            elif packet_type == "PING":
-
-                await send_packet(websocket, {
-                    "type": "PONG"
-                })
-
-            # LEAVE
-
-            elif packet_type == "LEAVE":
-
-                break
-
-    except ValueError as error:
-
-        try:
-            await send_packet(websocket, {
-                "type": "ERROR",
-                "message": str(error)
-            })
-
-        except Exception:
-            pass
-
-    except asyncio.TimeoutError:
-
-        print("Authentication timeout.")
-
-    except ConnectionClosed:
-
+    except websockets.exceptions.ConnectionClosed:
         pass
 
     except Exception as error:
-
-        print("Server error:", repr(error))
-
-        try:
-            await send_packet(websocket, {
-                "type": "ERROR",
-                "message": "Server error. Please try again."
-            })
-
-        except Exception:
-            pass
+        print("CLIENT ERROR:", error)
 
     finally:
-
-        if registered and username:
-
-            removed = await remove_connection(
-                username,
-                websocket
+        if username:
+            await remove_connection(
+                websocket,
+                username
             )
 
-            if removed:
-
-                print(username, "disconnected.")
-
-                await broadcast_packet({
-                    "type": "NOTICE",
-                    "message": username + " left PyChat."
-                })
-
-                await broadcast_users()
+            print(f"{username} disconnected.")
 
 
-# =====================================
+# =========================================
 # MAIN SERVER
-# =====================================
+# =========================================
 
 async def main():
-
     await init_database()
 
-    print("PyChat server starting...")
+    print("----------------------------------")
+    print("       PYCHAT SERVER STARTED")
+    print("----------------------------------")
+    print(f"Host: {HOST}")
+    print(f"Port: {PORT}")
+    print(f"Session duration: {SESSION_DAYS} days")
+    print("----------------------------------")
 
-    async with serve(
+    async with websockets.asyncio.server.serve(
         handle_client,
         HOST,
         PORT,
+        max_size=64 * 1024,
         ping_interval=20,
-        ping_timeout=30,
-        max_size=2**20
+        ping_timeout=20
     ):
-
-        print(
-            "PyChat server running on port",
-            PORT
-        )
-
         await asyncio.Future()
 
 
-# =====================================
-# START
-# =====================================
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+
+    except KeyboardInterrupt:
+        print("PyChat server stopped.")
+
+    except Exception as error:
+        print("SERVER ERROR:", error)
