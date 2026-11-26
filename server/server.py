@@ -160,30 +160,7 @@ async def init_database():
         """)
 
         # CHECK REQUIRED COLUMNS
-        required_columns = {
-            "users": [
-                "id",
-                "username",
-                "password_salt",
-                "password_hash",
-                "avatar",
-                "created_at"
-            ],
-            "sessions": [
-                "id",
-                "user_id",
-                "token_hash",
-                "expires_at",
-                "created_at"
-            ],
-            "messages": [
-                "id",
-                "username",
-                "message",
-                "created_at"
-            ]
-        }
-
+        
         for table, columns in required_columns.items():
 
             existing = await connection.fetch(
