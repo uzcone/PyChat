@@ -104,6 +104,7 @@ def hash_session_token(token):
 # DATABASE
 # =========================================
 
+
 async def init_database():
     global db_pool
 
@@ -119,6 +120,7 @@ async def init_database():
 
     async with db_pool.acquire() as connection:
 
+        # USERS TABLE
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -130,6 +132,13 @@ async def init_database():
             )
         """)
 
+        # ADD MISSING AVATAR COLUMN
+        await connection.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS avatar TEXT DEFAULT ''
+        """)
+
+        # SESSIONS TABLE
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id SERIAL PRIMARY KEY,
@@ -140,6 +149,7 @@ async def init_database():
             )
         """)
 
+        # MESSAGES TABLE
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -148,6 +158,19 @@ async def init_database():
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+
+        print("DATABASE TABLES CHECKED")
+
+        avatar_exists = await connection.fetchval("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'users'
+                AND column_name = 'avatar'
+            )
+        """)
+
+        print("AVATAR COLUMN EXISTS:", avatar_exists)
 
     print("DATABASE INITIALIZED")
 
