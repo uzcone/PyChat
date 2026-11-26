@@ -161,6 +161,27 @@ async def init_database():
 
         # CHECK REQUIRED COLUMNS
         
+        # DATABASE STRUCTURE DIAGNOSTICS
+        for table in ["users", "sessions", "messages"]:
+            columns = await connection.fetch(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = $1
+                ORDER BY ordinal_position
+                """,
+                table
+            )
+
+            column_names = [
+                row["column_name"] for row in columns
+            ]
+
+            print(f"DATABASE TABLE: {table}")
+            print(f"DATABASE COLUMNS: {column_names}")
+
+        
         for table, columns in required_columns.items():
 
             existing = await connection.fetch(
