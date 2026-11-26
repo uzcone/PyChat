@@ -26,6 +26,8 @@ clients = {}
 clients_lock = asyncio.Lock()
 db_pool = None
 
+DB_COLUMNS = {}
+
 
 # =========================================
 # GENERAL HELPERS
@@ -63,23 +65,97 @@ def hash_password(password, salt=None):
     if salt is None:
         salt = secrets.token_hex(16)
 
-    password_hash = hashlib.pbkdf2_hmac(
+    result = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
         salt.encode("utf-8"),
         PBKDF2_ITERATIONS
     ).hex()
 
-    return salt, password_hash
+    return salt, result
 
 
-def verify_password(password, salt, password_hash):
-    _, check_hash = hash_password(password, salt)
+def verify_password(password, salt, stored_hash):
+    if not stored_hash:
+        return False
 
-    return hmac.compare_digest(
-        check_hash,
-        password_hash
-    )
+    stored_hash = str(stored_hash).strip()
+
+    # Current PyChat PBKDF2 format
+    if salt:
+        _, calculated = hash_password(password, salt)
+
+        if hmac.compare_digest(
+            calculated.lower(),
+            stored_hash.lower()
+        ):
+            return True
+
+    # Encoded PBKDF2 formats
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        try:
+            import base64
+
+            parts = stored_hash.split("$")
+
+            iterations = int(parts[1])
+            encoded_salt = parts[2]
+            expected = base64.b64decode(parts[3])
+
+            calculated = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                encoded_salt.encode("utf-8"),
+                iterations
+            )
+
+            return hmac.compare_digest(
+                calculated,
+                expected
+            )
+        except Exception:
+            return False
+
+    # Common unsalted legacy formats
+    legacy_algorithms = {
+        32: "md5",
+        40: "sha1",
+        64: "sha256",
+        128: "sha512"
+    }
+
+    algorithm = legacy_algorithms.get(len(stored_hash))
+
+    if algorithm:
+        try:
+            calculated = hashlib.new(
+                algorithm,
+                password.encode("utf-8")
+            ).hexdigest()
+
+            if hmac.compare_digest(
+                calculated.lower(),
+                stored_hash.lower()
+            ):
+                return True
+        except Exception:
+            pass
+
+    # Optional bcrypt support if installed
+    if stored_hash.startswith(("$2a$", "$2b$", "$2y$")):
+        try:
+            import bcrypt
+
+            return bcrypt.checkpw(
+                password.encode("utf-8"),
+                stored_hash.encode("utf-8")
+            )
+        except ImportError:
+            print("BCRYPT SUPPORT NOT INSTALLED")
+        except Exception:
+            pass
+
+    return False
 
 
 # =========================================
@@ -97,6 +173,59 @@ def hash_session_token(token):
 
 
 # =========================================
+# DATABASE HELPERS
+# =========================================
+
+async def load_database_columns(connection):
+    global DB_COLUMNS
+
+    rows = await connection.fetch("""
+        SELECT
+            table_name,
+            column_name,
+            is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name IN ('users', 'sessions', 'messages')
+        ORDER BY table_name, ordinal_position
+    """)
+
+    DB_COLUMNS = {}
+
+    for row in rows:
+        table = row["table_name"]
+
+        DB_COLUMNS.setdefault(table, {})
+
+        DB_COLUMNS[table][row["column_name"]] = {
+            "nullable": row["is_nullable"] == "YES"
+        }
+
+    for table, columns in DB_COLUMNS.items():
+        print(
+            "DATABASE TABLE:",
+            table,
+            "COLUMNS:",
+            list(columns.keys())
+        )
+
+
+def require_columns(table, required):
+    existing = DB_COLUMNS.get(table, {})
+
+    missing = [
+        column
+        for column in required
+        if column not in existing
+    ]
+
+    if missing:
+        raise RuntimeError(
+            f"Table {table} is missing columns: {missing}"
+        )
+
+
+# =========================================
 # DATABASE INITIALIZATION
 # =========================================
 
@@ -104,9 +233,7 @@ async def init_database():
     global db_pool
 
     if not DATABASE_URL:
-        raise RuntimeError(
-            "DATABASE_URL is missing in Render Environment."
-        )
+        raise RuntimeError("DATABASE_URL is missing.")
 
     print("CONNECTING TO POSTGRESQL...")
 
@@ -119,25 +246,31 @@ async def init_database():
 
     async with db_pool.acquire() as connection:
 
-        # USERS TABLE
+        # USERS
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 username TEXT UNIQUE NOT NULL,
-                password_salt TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
+                avatar_type TEXT DEFAULT '',
+                avatar_value TEXT DEFAULT '',
                 avatar TEXT DEFAULT '',
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
-        # ADD AVATAR TO OLD USERS TABLE
+        # Safe additions to existing users table
+        await connection.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS password_salt TEXT
+        """)
+
         await connection.execute("""
             ALTER TABLE users
             ADD COLUMN IF NOT EXISTS avatar TEXT DEFAULT ''
         """)
 
-        # SESSIONS TABLE
+        # SESSIONS
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id SERIAL PRIMARY KEY,
@@ -149,92 +282,210 @@ async def init_database():
             )
         """)
 
-        # MESSAGES TABLE
+        # MESSAGES
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
-                username TEXT NOT NULL,
-                message TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                sender_id INTEGER REFERENCES users(id),
+                recipient_id INTEGER REFERENCES users(id),
+                content TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                read_at TIMESTAMPTZ
             )
         """)
 
-        # CHECK REQUIRED COLUMNS
-        
-        # DATABASE STRUCTURE DIAGNOSTICS
-        for table in ["users", "sessions", "messages"]:
-            columns = await connection.fetch(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = current_schema()
-                  AND table_name = $1
-                ORDER BY ordinal_position
-                """,
-                table
-            )
+        await load_database_columns(connection)
 
-            column_names = [
-                row["column_name"] for row in columns
+        require_columns(
+            "users",
+            [
+                "id",
+                "username",
+                "password_hash",
+                "password_salt",
+                "avatar",
+                "avatar_type",
+                "avatar_value",
+                "created_at"
             ]
+        )
 
-            print(f"DATABASE TABLE: {table}")
-            print(f"DATABASE COLUMNS: {column_names}")
-
-
-            existing = await connection.fetch(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = current_schema()
-                  AND table_name = $1
-                """,
-                table
-            )
-
-            existing_names = {
-                row["column_name"] for row in existing
-            }
-
-            missing = [
-                column for column in columns
-                if column not in existing_names
+        require_columns(
+            "sessions",
+            [
+                "id",
+                "user_id",
+                "token_hash",
+                "expires_at",
+                "created_at"
             ]
+        )
 
-            if missing:
-                raise RuntimeError(
-                    f"Database table '{table}' is missing "
-                    f"columns: {missing}"
-                )
-
-            print(
-                f"TABLE CHECKED: {table} - OK"
-            )
-
-        avatar_exists = await connection.fetchval("""
-            SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_schema = current_schema()
-                  AND table_name = 'users'
-                  AND column_name = 'avatar'
-            )
-        """)
-
-        print("AVATAR COLUMN EXISTS:", avatar_exists)
-
-        if not avatar_exists:
-            raise RuntimeError(
-                "The users.avatar column is still missing."
-            )
+        require_columns(
+            "messages",
+            [
+                "id",
+                "sender_id",
+                "recipient_id",
+                "content",
+                "created_at"
+            ]
+        )
 
         user_count = await connection.fetchval(
             "SELECT COUNT(*) FROM users"
         )
 
+        message_count = await connection.fetchval(
+            "SELECT COUNT(*) FROM messages"
+        )
+
         print("EXISTING USERS:", user_count)
+        print("EXISTING MESSAGES:", message_count)
 
     print("DATABASE INITIALIZED SUCCESSFULLY")
+
+
+# =========================================
+# USER HELPERS
+# =========================================
+
+def get_avatar(user):
+    if not user:
+        return ""
+
+    return (
+        user.get("avatar")
+        or user.get("avatar_value")
+        or ""
+    )
+
+
+async def get_user(username):
+    async with db_pool.acquire() as connection:
+        return await connection.fetchrow("""
+            SELECT
+                id,
+                username,
+                password_salt,
+                password_hash,
+                avatar,
+                avatar_type,
+                avatar_value,
+                created_at
+            FROM users
+            WHERE username = $1
+        """, username)
+
+
+async def create_user(username, password):
+    salt, password_hash = hash_password(password)
+
+    async with db_pool.acquire() as connection:
+        try:
+            return await connection.fetchrow("""
+                INSERT INTO users (
+                    username,
+                    password_salt,
+                    password_hash,
+                    avatar,
+                    avatar_type,
+                    avatar_value
+                )
+                VALUES ($1, $2, $3, '', '', '')
+                RETURNING *
+            """,
+                username,
+                salt,
+                password_hash
+            )
+
+        except asyncpg.UniqueViolationError:
+            return None
+
+
+async def update_user_avatar(username, avatar):
+    async with db_pool.acquire() as connection:
+        await connection.execute("""
+            UPDATE users
+            SET avatar = $1,
+                avatar_value = $1
+            WHERE username = $2
+        """, avatar, username)
+
+
+# =========================================
+# SESSION DATABASE
+# =========================================
+
+async def save_session(user_id):
+    token = create_session_token()
+    token_hash = hash_session_token(token)
+
+    expires_at = utc_now() + timedelta(
+        days=SESSION_DAYS
+    )
+
+    async with db_pool.acquire() as connection:
+        await connection.execute("""
+            INSERT INTO sessions (
+                user_id,
+                token_hash,
+                expires_at
+            )
+            VALUES ($1, $2, $3)
+        """,
+            user_id,
+            token_hash,
+            expires_at
+        )
+
+    return token, token_hash, expires_at
+
+
+async def get_session(token):
+    token_hash = hash_session_token(token)
+
+    async with db_pool.acquire() as connection:
+        session = await connection.fetchrow("""
+            SELECT
+                sessions.token_hash,
+                sessions.expires_at,
+                users.id AS user_id,
+                users.username,
+                users.avatar,
+                users.avatar_type,
+                users.avatar_value
+            FROM sessions
+            JOIN users
+                ON users.id = sessions.user_id
+            WHERE sessions.token_hash = $1
+        """, token_hash)
+
+    if not session:
+        return None
+
+    if session["expires_at"] <= utc_now():
+        await delete_session(token_hash)
+        return None
+
+    return session
+
+
+async def delete_session(token_hash):
+    async with db_pool.acquire() as connection:
+        await connection.execute("""
+            DELETE FROM sessions
+            WHERE token_hash = $1
+        """, token_hash)
+
+
+async def delete_user_sessions(user_id):
+    async with db_pool.acquire() as connection:
+        await connection.execute("""
+            DELETE FROM sessions
+            WHERE user_id = $1
+        """, user_id)
 
 
 # =========================================
@@ -249,26 +500,23 @@ async def online_users():
 async def broadcast_packet(packet):
     async with clients_lock:
         sockets = [
-            client["websocket"]
-            for client in clients.values()
+            item["websocket"]
+            for item in clients.values()
         ]
 
-    if not sockets:
-        return
-
-    await asyncio.gather(
-        *[
-            send_json(socket, packet)
-            for socket in sockets
-        ],
-        return_exceptions=True
-    )
+    if sockets:
+        await asyncio.gather(
+            *[
+                send_json(socket, packet)
+                for socket in sockets
+            ],
+            return_exceptions=True
+        )
 
 
 async def update_users():
     users = await online_users()
 
-    print("ONLINE USERS:", users)
     print("ONLINE COUNT:", len(users))
 
     await broadcast_packet(
@@ -289,7 +537,6 @@ async def register_connection(
     old_websocket = None
 
     async with clients_lock:
-
         old_client = clients.get(username)
 
         if old_client:
@@ -301,8 +548,7 @@ async def register_connection(
             "token_hash": token_hash
         }
 
-        print("USER CONNECTED:", username)
-        print("ONLINE:", list(clients.keys()))
+    print("USER CONNECTED:", username)
 
     if old_websocket and old_websocket != websocket:
         try:
@@ -321,166 +567,15 @@ async def remove_connection(websocket, username):
     removed = False
 
     async with clients_lock:
-
         current = clients.get(username)
 
         if current and current["websocket"] == websocket:
             del clients[username]
             removed = True
 
-        print("CONNECTION CLOSED:", username)
-        print("REMOVED:", removed)
-
     if removed:
+        print("USER DISCONNECTED:", username)
         await update_users()
-
-
-# =========================================
-# USER DATABASE FUNCTIONS
-# =========================================
-
-async def get_user(username):
-    async with db_pool.acquire() as connection:
-        return await connection.fetchrow(
-            """
-            SELECT
-                id,
-                username,
-                password_salt,
-                password_hash,
-                avatar,
-                created_at
-            FROM users
-            WHERE username = $1
-            """,
-            username
-        )
-
-
-async def create_user(username, password):
-    salt, password_hash = hash_password(password)
-
-    async with db_pool.acquire() as connection:
-        try:
-            return await connection.fetchrow(
-                """
-                INSERT INTO users (
-                    username,
-                    password_salt,
-                    password_hash,
-                    avatar
-                )
-                VALUES ($1, $2, $3, '')
-                RETURNING
-                    id,
-                    username,
-                    password_salt,
-                    password_hash,
-                    avatar,
-                    created_at
-                """,
-                username,
-                salt,
-                password_hash
-            )
-
-        except asyncpg.UniqueViolationError:
-            return None
-
-
-async def update_user_avatar(username, avatar):
-    async with db_pool.acquire() as connection:
-        await connection.execute(
-            """
-            UPDATE users
-            SET avatar = $1
-            WHERE username = $2
-            """,
-            avatar,
-            username
-        )
-
-
-# =========================================
-# SESSION DATABASE FUNCTIONS
-# =========================================
-
-async def save_session(user_id):
-    token = create_session_token()
-    token_hash = hash_session_token(token)
-
-    expires_at = utc_now() + timedelta(
-        days=SESSION_DAYS
-    )
-
-    async with db_pool.acquire() as connection:
-        await connection.execute(
-            """
-            INSERT INTO sessions (
-                user_id,
-                token_hash,
-                expires_at
-            )
-            VALUES ($1, $2, $3)
-            """,
-            user_id,
-            token_hash,
-            expires_at
-        )
-
-    return token, token_hash, expires_at
-
-
-async def get_session(token):
-    token_hash = hash_session_token(token)
-
-    async with db_pool.acquire() as connection:
-        session = await connection.fetchrow(
-            """
-            SELECT
-                sessions.token_hash,
-                sessions.expires_at,
-                users.id AS user_id,
-                users.username,
-                users.avatar
-            FROM sessions
-            JOIN users
-                ON users.id = sessions.user_id
-            WHERE sessions.token_hash = $1
-            """,
-            token_hash
-        )
-
-    if not session:
-        return None
-
-    if session["expires_at"] <= utc_now():
-        await delete_session(token_hash)
-        return None
-
-    return session
-
-
-async def delete_session(token_hash):
-    async with db_pool.acquire() as connection:
-        await connection.execute(
-            """
-            DELETE FROM sessions
-            WHERE token_hash = $1
-            """,
-            token_hash
-        )
-
-
-async def delete_user_sessions(user_id):
-    async with db_pool.acquire() as connection:
-        await connection.execute(
-            """
-            DELETE FROM sessions
-            WHERE user_id = $1
-            """,
-            user_id
-        )
 
 
 # =========================================
@@ -489,54 +584,75 @@ async def delete_user_sessions(user_id):
 
 async def save_message(username, message):
     async with db_pool.acquire() as connection:
-        return await connection.fetchrow(
-            """
-            INSERT INTO messages (
-                username,
-                message
+
+        user_id = await connection.fetchval("""
+            SELECT id
+            FROM users
+            WHERE username = $1
+        """, username)
+
+        if user_id is None:
+            raise RuntimeError("Message sender not found.")
+
+        recipient_nullable = (
+            DB_COLUMNS["messages"]["recipient_id"]["nullable"]
+        )
+
+        recipient_id = None
+
+        if not recipient_nullable:
+            recipient_id = user_id
+            print(
+                "WARNING: recipient_id is NOT NULL; "
+                "using sender_id as fallback."
             )
-            VALUES ($1, $2)
-            RETURNING
-                id,
-                username,
-                message,
-                created_at
-            """,
-            username,
+
+        return await connection.fetchrow("""
+            INSERT INTO messages (
+                sender_id,
+                recipient_id,
+                content
+            )
+            VALUES ($1, $2, $3)
+            RETURNING id, sender_id, recipient_id, content, created_at
+        """,
+            user_id,
+            recipient_id,
             message
         )
 
 
 async def get_message_history(limit=100):
     async with db_pool.acquire() as connection:
-        rows = await connection.fetch(
-            """
+        rows = await connection.fetch("""
             SELECT
-                id,
-                username,
-                message,
-                created_at
+                messages.id,
+                messages.sender_id,
+                messages.recipient_id,
+                messages.content,
+                messages.created_at,
+                users.username
             FROM messages
-            ORDER BY id DESC
+            LEFT JOIN users
+                ON users.id = messages.sender_id
+            ORDER BY messages.id DESC
             LIMIT $1
-            """,
-            limit
-        )
+        """, limit)
 
     return list(reversed(rows))
 
 
 async def send_history(websocket):
-    messages = await get_message_history()
+    rows = await get_message_history()
 
     history = [
         {
             "id": row["id"],
-            "username": row["username"],
-            "message": row["message"],
+            "username": row["username"] or "Unknown",
+            "message": row["content"],
             "time": row["created_at"].isoformat()
         }
-        for row in messages
+        for row in rows
     ]
 
     await send_packet(
@@ -573,13 +689,13 @@ async def finish_authentication(
         user_id=user["id"],
         token=token,
         expires_at=expires_at.isoformat(),
-        avatar=user["avatar"] or ""
+        avatar=get_avatar(user),
+        avatar_type=user.get("avatar_type") or "",
+        avatar_value=user.get("avatar_value") or ""
     )
 
     if not sent:
-        raise RuntimeError(
-            "Could not send WELCOME packet."
-        )
+        raise RuntimeError("WELCOME packet could not be sent.")
 
     await send_history(websocket)
     await update_users()
@@ -606,10 +722,7 @@ async def authenticate_connection(websocket):
 
         packet_type = packet.get("type")
 
-        # ---------------------------------
         # REGISTER
-        # ---------------------------------
-
         if packet_type == "REGISTER":
 
             username = str(
@@ -663,10 +776,7 @@ async def authenticate_connection(websocket):
 
             return username
 
-        # ---------------------------------
         # LOGIN
-        # ---------------------------------
-
         elif packet_type == "LOGIN":
 
             username = str(
@@ -680,8 +790,6 @@ async def authenticate_connection(websocket):
             user = await get_user(username)
 
             if not user:
-                print("LOGIN FAILED: USER NOT FOUND:", username)
-
                 await send_packet(
                     websocket,
                     "ERROR",
@@ -689,12 +797,14 @@ async def authenticate_connection(websocket):
                 )
                 return None
 
-            if not verify_password(
+            valid = verify_password(
                 password,
                 user["password_salt"],
                 user["password_hash"]
-            ):
-                print("LOGIN FAILED: WRONG PASSWORD:", username)
+            )
+
+            if not valid:
+                print("LOGIN FAILED: PASSWORD FORMAT OR PASSWORD MISMATCH:", username)
 
                 await send_packet(
                     websocket,
@@ -702,6 +812,24 @@ async def authenticate_connection(websocket):
                     message="Invalid username or password."
                 )
                 return None
+
+            # Upgrade a supported legacy hash to current PBKDF2
+            if not user["password_salt"]:
+                salt, new_hash = hash_password(password)
+
+                async with db_pool.acquire() as connection:
+                    await connection.execute("""
+                        UPDATE users
+                        SET password_salt = $1,
+                            password_hash = $2
+                        WHERE id = $3
+                    """,
+                        salt,
+                        new_hash,
+                        user["id"]
+                    )
+
+                user = await get_user(username)
 
             token, token_hash, expires_at = await save_session(
                 user["id"]
@@ -717,10 +845,7 @@ async def authenticate_connection(websocket):
 
             return username
 
-        # ---------------------------------
-        # RESUME SESSION
-        # ---------------------------------
-
+        # RESUME
         elif packet_type == "RESUME":
 
             token = str(
@@ -748,7 +873,9 @@ async def authenticate_connection(websocket):
             user = {
                 "id": session["user_id"],
                 "username": session["username"],
-                "avatar": session["avatar"] or ""
+                "avatar": session["avatar"],
+                "avatar_type": session["avatar_type"],
+                "avatar_value": session["avatar_value"]
             }
 
             await finish_authentication(
@@ -797,6 +924,7 @@ async def authenticate_connection(websocket):
 # =========================================
 
 async def handle_client(websocket):
+
     username = None
 
     print("NEW WEBSOCKET CONNECTION")
@@ -813,7 +941,7 @@ async def handle_client(websocket):
                 packet = json.loads(raw_message)
 
                 if not isinstance(packet, dict):
-                    raise ValueError("Packet must be an object.")
+                    raise ValueError("Invalid packet.")
 
             except Exception:
                 await send_packet(
@@ -852,8 +980,8 @@ async def handle_client(websocket):
                     create_packet(
                         "MESSAGE",
                         id=row["id"],
-                        username=row["username"],
-                        message=row["message"],
+                        username=username,
+                        message=row["content"],
                         time=row["created_at"].isoformat()
                     )
                 )
@@ -880,8 +1008,6 @@ async def handle_client(websocket):
 
             # LEAVE
             elif packet_type == "LEAVE":
-
-                print("USER LEFT:", username)
 
                 await websocket.close(
                     code=1000,
@@ -931,6 +1057,7 @@ async def handle_client(websocket):
 # =========================================
 
 async def main():
+
     print("================================")
     print("PYCHAT SERVER STARTING")
     print("DATABASE URL EXISTS:", bool(DATABASE_URL))
@@ -940,7 +1067,10 @@ async def main():
         await init_database()
 
     except Exception as error:
-        print("DATABASE INITIALIZATION FAILED:", repr(error))
+        print(
+            "DATABASE INITIALIZATION FAILED:",
+            repr(error)
+        )
         raise
 
     print("================================")
