@@ -181,8 +181,6 @@ async def init_database():
             print(f"DATABASE TABLE: {table}")
             print(f"DATABASE COLUMNS: {column_names}")
 
-        
-        for table, columns in required_columns.items():
 
             existing = await connection.fetch(
                 """
