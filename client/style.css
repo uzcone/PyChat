@@ -1078,3 +1078,137 @@ textarea {
         animation-duration: .01ms !important;
     }
 }
+
+/* =========================================
+   TOP ONLINE USERS
+   ========================================= */
+
+.top-online-section {
+    flex-shrink: 0;
+    padding: 13px 20px 12px;
+    border-bottom: 1px solid var(--border);
+    background: #fcfdfc;
+}
+
+.top-online-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 11px;
+}
+
+.top-online-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+    font-size: 13px;
+}
+
+.online-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #59c58b;
+    box-shadow: 0 0 0 4px rgba(89, 197, 139, .12);
+}
+
+.top-online-count {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.top-online-users {
+    min-height: 65px;
+    display: flex;
+    align-items: center;
+    gap: 17px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+}
+
+.top-online-users::-webkit-scrollbar {
+    display: none;
+}
+
+.top-online-user {
+    min-width: 52px;
+    max-width: 70px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+}
+
+.top-online-avatar-wrapper {
+    position: relative;
+    width: 43px;
+    height: 43px;
+    flex-shrink: 0;
+}
+
+.top-online-avatar {
+    width: 43px;
+    height: 43px;
+    border: 2px solid #e5f1e8;
+    border-radius: 50%;
+    background: var(--green-light);
+    color: var(--green);
+    display: grid;
+    place-items: center;
+    font-size: 17px;
+    font-weight: 800;
+}
+
+.top-online-dot {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #fcfdfc;
+    border-radius: 50%;
+    background: #59c58b;
+}
+
+.top-online-name {
+    width: 70px;
+    overflow: hidden;
+    color: var(--text);
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.top-online-empty {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+/* Mobile */
+@media (max-width: 600px) {
+    .top-online-section {
+        padding: 11px 13px 10px;
+    }
+
+    .top-online-users {
+        min-height: 61px;
+        gap: 15px;
+    }
+
+    .top-online-avatar-wrapper,
+    .top-online-avatar {
+        width: 40px;
+        height: 40px;
+    }
+
+    .top-online-name {
+        font-size: 10px;
+    }
+}
+
