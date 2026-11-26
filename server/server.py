@@ -1,3 +1,4 @@
+
 import os
 import json
 import asyncio
@@ -16,12 +17,11 @@ from websockets.exceptions import ConnectionClosed
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 8765))
-
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-db_pool = None
+SESSION_DAYS = 30
 
-# Connected users: {websocket: {"id": ..., "username": ...}}
+db_pool = None
 clients = {}
 
 
@@ -61,6 +61,76 @@ def verify_password(password, stored_hash):
 
 
 # =====================================
+# SESSION SECURITY
+# =====================================
+
+def hash_token(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+async def create_session(user_id):
+    token = secrets.token_urlsafe(32)
+    token_hash = hash_token(token)
+
+    async with db_pool.acquire() as connection:
+        await connection.execute("""
+            INSERT INTO user_sessions (
+                token_hash,
+                user_id,
+                expires_at
+            )
+            VALUES (
+                $1,
+                $2,
+                NOW() + INTERVAL '30 days'
+            )
+        """, token_hash, user_id)
+
+    return token
+
+
+async def authenticate_session(token):
+    if not isinstance(token, str) or len(token) > 200:
+        raise ValueError("Invalid session. Please sign in again.")
+
+    token_hash = hash_token(token)
+
+    async with db_pool.acquire() as connection:
+        user = await connection.fetchrow("""
+            UPDATE user_sessions
+            SET expires_at = NOW() + INTERVAL '30 days'
+            WHERE token_hash = $1
+              AND expires_at > NOW()
+            RETURNING user_id
+        """, token_hash)
+
+        if not user:
+            raise ValueError("Session expired. Please sign in again.")
+
+        account = await connection.fetchrow("""
+            SELECT id, username
+            FROM users
+            WHERE id = $1
+        """, user["user_id"])
+
+    if not account:
+        raise ValueError("Account not found.")
+
+    return account
+
+
+async def delete_session(token):
+    if not isinstance(token, str):
+        return
+
+    async with db_pool.acquire() as connection:
+        await connection.execute("""
+            DELETE FROM user_sessions
+            WHERE token_hash = $1
+        """, hash_token(token))
+
+
+# =====================================
 # DATABASE INITIALIZATION
 # =====================================
 
@@ -78,6 +148,7 @@ async def init_database():
     )
 
     async with db_pool.acquire() as connection:
+
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id BIGSERIAL PRIMARY KEY,
@@ -102,7 +173,19 @@ async def init_database():
             );
         """)
 
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id BIGINT NOT NULL
+                    REFERENCES users(id)
+                    ON DELETE CASCADE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL
+            );
+        """)
+
     print("PostgreSQL connected successfully.")
+    print("Session system initialized.")
 
 
 # =====================================
@@ -116,7 +199,7 @@ async def send_packet(websocket, packet):
 
 
 # =====================================
-# BROADCAST HELPER
+# BROADCAST
 # =====================================
 
 async def broadcast_packet(packet):
@@ -125,41 +208,24 @@ async def broadcast_packet(packet):
     for websocket in list(clients.keys()):
         try:
             await send_packet(websocket, packet)
-        except ConnectionClosed:
-            disconnected.append(websocket)
-        except Exception as error:
-            print("Broadcast send warning:", str(error))
+        except Exception:
             disconnected.append(websocket)
 
     for websocket in disconnected:
         clients.pop(websocket, None)
 
 
-# =====================================
-# ONLINE USERS
-# =====================================
-
 async def broadcast_users():
-    users = [
+    users = list(dict.fromkeys(
         client["username"]
         for client in clients.values()
-    ]
+    ))
 
-    packet = {
+    await broadcast_packet({
         "type": "USERS",
         "users": users,
         "count": len(users)
-    }
-
-    await broadcast_packet(packet)
-
-
-# =====================================
-# BROADCAST MESSAGE
-# =====================================
-
-async def broadcast_message(packet):
-    await broadcast_packet(packet)
+    })
 
 
 # =====================================
@@ -167,16 +233,31 @@ async def broadcast_message(packet):
 # =====================================
 
 async def authenticate(packet):
+    if not isinstance(packet, dict):
+        raise ValueError("Invalid request.")
+
     action = packet.get("type")
 
-    username = packet.get("username", "").strip()
-    password = packet.get("password", "")
+    # RESTORE EXISTING SESSION
+    if action == "SESSION":
+        token = packet.get("token")
+        user = await authenticate_session(token)
+
+        return {
+            "user": user,
+            "token": token
+        }
+
+    username = packet.get("username")
+    password = packet.get("password")
 
     if not isinstance(username, str):
         raise ValueError("Invalid username.")
 
     if not isinstance(password, str):
         raise ValueError("Invalid password.")
+
+    username = username.strip()
 
     if not re.fullmatch(r"[a-zA-Z0-9_]{3,30}", username):
         raise ValueError(
@@ -189,8 +270,12 @@ async def authenticate(packet):
         )
 
     async with db_pool.acquire() as connection:
+
         if action == "REGISTER":
-            password_hash = await asyncio.to_thread(hash_password, password)
+            password_hash = await asyncio.to_thread(
+                hash_password,
+                password
+            )
 
             try:
                 user = await connection.fetchrow("""
@@ -201,8 +286,6 @@ async def authenticate(packet):
                     VALUES ($1, $2)
                     RETURNING id, username
                 """, username, password_hash)
-
-                return user
 
             except asyncpg.UniqueViolationError:
                 raise ValueError("This username is already taken.")
@@ -215,25 +298,34 @@ async def authenticate(packet):
             """, username)
 
             if not user:
-                raise ValueError("Incorrect username or password.")
+                raise ValueError(
+                    "Incorrect username or password."
+                )
 
-            is_valid = await asyncio.to_thread(
+            valid = await asyncio.to_thread(
                 verify_password,
                 password,
                 user["password_hash"]
             )
 
-            if not is_valid:
-                raise ValueError("Incorrect username or password.")
-
-            return user
+            if not valid:
+                raise ValueError(
+                    "Incorrect username or password."
+                )
 
         else:
             raise ValueError("Unknown authentication request.")
 
+    token = await create_session(user["id"])
+
+    return {
+        "user": user,
+        "token": token
+    }
+
 
 # =====================================
-# SAVE & LOAD MESSAGES
+# MESSAGE STORAGE
 # =====================================
 
 async def save_message(user_id, message):
@@ -276,30 +368,20 @@ async def handle_client(websocket):
     username = None
 
     try:
-        # FIRST PACKET: LOGIN OR REGISTER
         raw_packet = await asyncio.wait_for(
             websocket.recv(),
             timeout=30
         )
 
         packet = json.loads(raw_packet)
-        user = await authenticate(packet)
+
+        auth = await authenticate(packet)
+
+        user = auth["user"]
         username = user["username"]
+        session_token = auth["token"]
 
-        # Prevent duplicate online sessions for the same account
-        already_online = any(
-            client["username"] == username
-            for client in clients.values()
-        )
-
-        if already_online:
-            await send_packet(websocket, {
-                "type": "ERROR",
-                "message": "This account is already online."
-            })
-            return
-
-        # Register connected client
+        # Multiple connections for the same account are allowed.
         clients[websocket] = {
             "id": user["id"],
             "username": username
@@ -308,17 +390,18 @@ async def handle_client(websocket):
         await send_packet(websocket, {
             "type": "WELCOME",
             "username": username,
+            "session_token": session_token,
             "message": "Welcome to PyChat, " + username + "!"
         })
 
-        # Send chat history so messages are not lost on reconnect/reload
         history = await get_recent_messages(limit=50)
+
         await send_packet(websocket, {
             "type": "HISTORY",
             "messages": history
         })
 
-        await broadcast_message({
+        await broadcast_packet({
             "type": "NOTICE",
             "message": username + " joined PyChat."
         })
@@ -327,13 +410,15 @@ async def handle_client(websocket):
 
         print(username, "connected.")
 
-        # =================================
         # MAIN MESSAGE LOOP
-        # =================================
         async for raw_message in websocket:
+
             try:
                 packet = json.loads(raw_message)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            if not isinstance(packet, dict):
                 continue
 
             packet_type = packet.get("type")
@@ -352,7 +437,7 @@ async def handle_client(websocket):
 
                 await save_message(user["id"], message)
 
-                await broadcast_message({
+                await broadcast_packet({
                     "type": "MESSAGE",
                     "username": username,
                     "message": message
@@ -364,8 +449,13 @@ async def handle_client(websocket):
                     "type": "PONG"
                 })
 
-            # LEAVE
+            # NORMAL DISCONNECT — KEEP SESSION
             elif packet_type == "LEAVE":
+                break
+
+            # EXPLICIT LOGOUT — DELETE THIS SESSION
+            elif packet_type == "LOGOUT":
+                await delete_session(session_token)
                 break
 
     except ValueError as error:
@@ -374,7 +464,7 @@ async def handle_client(websocket):
                 "type": "ERROR",
                 "message": str(error)
             })
-        except ConnectionClosed:
+        except Exception:
             pass
 
     except asyncio.TimeoutError:
@@ -385,12 +475,13 @@ async def handle_client(websocket):
 
     except Exception as error:
         print("Server error:", str(error))
+
         try:
             await send_packet(websocket, {
                 "type": "ERROR",
                 "message": "Server error. Please try again."
             })
-        except ConnectionClosed:
+        except Exception:
             pass
 
     finally:
@@ -398,12 +489,12 @@ async def handle_client(websocket):
         clients.pop(websocket, None)
 
         if was_registered:
-            if username:
-                print(username, "disconnected.")
-                await broadcast_message({
-                    "type": "NOTICE",
-                    "message": username + " left PyChat."
-                })
+            print(username, "disconnected.")
+
+            await broadcast_packet({
+                "type": "NOTICE",
+                "message": username + " left PyChat."
+            })
 
             await broadcast_users()
 
