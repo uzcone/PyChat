@@ -2,18 +2,26 @@
 "use strict";
 
 // =====================================
-// PYCHAT — WEBSOCKET CLIENT
-// AUTO LOGIN + AUTO RECONNECT
+// PYCHAT — TOKEN SESSION CLIENT
+// 30-DAY SESSION + AUTO RESUME
 // =====================================
 
 const SERVER_URL = "wss://pychat-8gdk.onrender.com";
+
+// Eski versiyada parol saqlangan kalit
 const STORAGE_KEY = "pychat_saved_account";
+
+// Yangi versiyada token saqlanadigan kalit
+const SESSION_STORAGE_KEY = "pychat_saved_session";
 
 let socket = null;
 let username = "";
 let joined = false;
 
-let authCredentials = null;
+let sessionToken = null;
+let sessionExpiresAt = null;
+let legacyCredentials = null;
+
 let autoLoginEnabled = false;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
@@ -97,6 +105,16 @@ function setStatus(online, text) {
     }
 }
 
+function updateSendAvailability() {
+    if (sendButton) {
+        sendButton.disabled = !joined;
+    }
+
+    if (messageInput) {
+        messageInput.disabled = !joined;
+    }
+}
+
 
 // =====================================
 // SCREEN SWITCHING
@@ -135,6 +153,7 @@ function showLogin() {
     if (chatScreen) chatScreen.classList.add("hidden");
 
     setStatus(false, "Offline");
+    updateSendAvailability();
 
     if (messages) {
         messages.replaceChildren();
@@ -164,6 +183,38 @@ function showLogin() {
 
 
 // =====================================
+// INSTANT CHAT SCREEN
+// =====================================
+
+function showChatImmediately(savedUsername) {
+    username = savedUsername || username;
+
+    if (myUsername) {
+        myUsername.textContent = username;
+    }
+
+    if (myAvatar) {
+        myAvatar.textContent =
+            username.charAt(0).toUpperCase() || "U";
+    }
+
+    if (loginScreen) loginScreen.classList.add("hidden");
+    if (chatScreen) chatScreen.classList.remove("hidden");
+
+    if (chatTitle) {
+        chatTitle.textContent = "General Chat";
+    }
+
+    if (chatSubtitle) {
+        chatSubtitle.textContent = "Connecting to PyChat...";
+    }
+
+    setStatus(false, "Connecting...");
+    updateSendAvailability();
+}
+
+
+// =====================================
 // PASSWORD VISIBILITY
 // =====================================
 
@@ -178,24 +229,66 @@ function togglePassword(input, button) {
 
 
 // =====================================
-// SAVE ACCOUNT
+// SESSION STORAGE
 // =====================================
 
-function saveAccount(credentials) {
+function saveSession(token, savedUsername, expiresAt) {
+    if (!token) return;
+
     try {
+        const session = {
+            token: token,
+            username: savedUsername || username,
+            expires_at: expiresAt || null
+        };
+
         localStorage.setItem(
-            STORAGE_KEY,
-            JSON.stringify(credentials)
+            SESSION_STORAGE_KEY,
+            JSON.stringify(session)
         );
 
-        authCredentials = credentials;
+        sessionToken = token;
+        sessionExpiresAt = expiresAt || null;
+        username = session.username;
+
+        // Eski parol saqlangan yozuvni o'chirish
+        localStorage.removeItem(STORAGE_KEY);
+
+        legacyCredentials = null;
         autoLoginEnabled = true;
+
     } catch (error) {
-        console.error("Account storage error:", error);
+        console.error("Session storage error:", error);
     }
 }
 
-function loadAccount() {
+function loadSession() {
+    try {
+        const saved = localStorage.getItem(SESSION_STORAGE_KEY);
+
+        if (!saved) return null;
+
+        const session = JSON.parse(saved);
+
+        if (
+            !session ||
+            typeof session.token !== "string" ||
+            !session.token ||
+            typeof session.username !== "string" ||
+            !session.username
+        ) {
+            return null;
+        }
+
+        return session;
+
+    } catch (error) {
+        console.error("Session loading error:", error);
+        return null;
+    }
+}
+
+function loadLegacyAccount() {
     try {
         const saved = localStorage.getItem(STORAGE_KEY);
 
@@ -212,16 +305,21 @@ function loadAccount() {
         }
 
         return account;
+
     } catch (error) {
-        console.error("Account loading error:", error);
+        console.error("Legacy account loading error:", error);
         return null;
     }
 }
 
-function removeSavedAccount() {
+function removeSavedSession() {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
     localStorage.removeItem(STORAGE_KEY);
 
-    authCredentials = null;
+    sessionToken = null;
+    sessionExpiresAt = null;
+    legacyCredentials = null;
+
     autoLoginEnabled = false;
 }
 
@@ -230,7 +328,7 @@ function removeSavedAccount() {
 // CONNECT TO SERVER
 // =====================================
 
-function connectAndAuthenticate(type, credentials) {
+function connectAndAuthenticate(type, data) {
     return new Promise((resolve, reject) => {
 
         if (connectionInProgress) {
@@ -284,11 +382,12 @@ function connectAndAuthenticate(type, credentials) {
         ws.onopen = () => {
             setStatus(false, "Authenticating...");
 
-            ws.send(JSON.stringify({
+            const packet = {
                 type: type,
-                username: credentials.username,
-                password: credentials.password
-            }));
+                ...data
+            };
+
+            ws.send(JSON.stringify(packet));
         };
 
         ws.onmessage = (event) => {
@@ -318,6 +417,11 @@ function connectAndAuthenticate(type, credentials) {
             }
 
             joined = false;
+            updateSendAvailability();
+
+            if (!settled) {
+                fail(new Error("Connection closed. Please try again."));
+            }
 
             setStatus(false, "Disconnected");
 
@@ -325,11 +429,42 @@ function connectAndAuthenticate(type, credentials) {
                 setStatus(false, "Reconnecting...");
                 scheduleReconnect();
             } else if (!autoLoginEnabled && !manualDisconnect) {
-                if (loginError && !settled) {
-                    loginError.textContent = "Connection closed. Please try again.";
+                if (loginError) {
+                    loginError.textContent =
+                        "Connection closed. Please try again.";
                 }
             }
         };
+    });
+}
+
+
+// =====================================
+// AUTHENTICATION HELPER
+// =====================================
+
+function authenticateWithSession() {
+    if (!sessionToken) {
+        return Promise.reject(
+            new Error("No saved session token.")
+        );
+    }
+
+    return connectAndAuthenticate("RESUME", {
+        token: sessionToken
+    });
+}
+
+function authenticateWithLegacyAccount() {
+    if (!legacyCredentials) {
+        return Promise.reject(
+            new Error("No saved account.")
+        );
+    }
+
+    return connectAndAuthenticate("LOGIN", {
+        username: legacyCredentials.username,
+        password: legacyCredentials.password
     });
 }
 
@@ -340,7 +475,6 @@ function connectAndAuthenticate(type, credentials) {
 
 function scheduleReconnect() {
     if (!autoLoginEnabled || manualDisconnect) return;
-
     if (reconnectTimer) return;
 
     const delay = Math.min(
@@ -355,13 +489,20 @@ function scheduleReconnect() {
     reconnectTimer = setTimeout(async () => {
         reconnectTimer = null;
 
-        if (!authCredentials || manualDisconnect) return;
+        if (manualDisconnect || !autoLoginEnabled) return;
 
         try {
-            await connectAndAuthenticate(
-                "LOGIN",
-                authCredentials
-            );
+            if (sessionToken) {
+                await authenticateWithSession();
+
+            } else if (legacyCredentials) {
+                await authenticateWithLegacyAccount();
+
+            } else {
+                autoLoginEnabled = false;
+                showLogin();
+                return;
+            }
 
             reconnectAttempts = 0;
 
@@ -392,7 +533,19 @@ function handlePacket(packet, onSuccess, onError) {
 
             username = packet.username || username;
 
+            // Serverdan kelgan tokenni saqlash
+            if (packet.token) {
+                saveSession(
+                    packet.token,
+                    username,
+                    packet.expires_at
+                );
+            }
+
+            autoLoginEnabled = Boolean(sessionToken || autoLoginEnabled);
+
             setStatus(true, "Connected");
+            updateSendAvailability();
 
             if (myUsername) {
                 myUsername.textContent = username;
@@ -410,7 +563,9 @@ function handlePacket(packet, onSuccess, onError) {
             if (loginScreen) loginScreen.classList.add("hidden");
             if (chatScreen) chatScreen.classList.remove("hidden");
 
-            if (chatTitle) chatTitle.textContent = "General Chat";
+            if (chatTitle) {
+                chatTitle.textContent = "General Chat";
+            }
 
             if (chatSubtitle) {
                 chatSubtitle.textContent =
@@ -527,8 +682,6 @@ async function login() {
     try {
         await connectAndAuthenticate("LOGIN", credentials);
 
-        saveAccount(credentials);
-
         if (loginPassword) loginPassword.value = "";
 
     } catch (error) {
@@ -604,8 +757,6 @@ async function register() {
     try {
         await connectAndAuthenticate("REGISTER", credentials);
 
-        saveAccount(credentials);
-
         if (registerPassword) registerPassword.value = "";
         if (confirmPassword) confirmPassword.value = "";
 
@@ -623,48 +774,90 @@ async function register() {
 
 
 // =====================================
-// AUTOMATIC LOGIN
+// AUTOMATIC SESSION RESTORE
 // =====================================
 
 async function automaticLogin() {
-    const savedAccount = loadAccount();
+    const savedSession = loadSession();
 
-    if (!savedAccount) {
+    const savedAccount = savedSession
+        ? null
+        : loadLegacyAccount();
+
+    if (!savedSession && !savedAccount) {
         showLoginForm();
         return;
     }
 
-    authCredentials = savedAccount;
-    autoLoginEnabled = true;
     manualDisconnect = false;
+    autoLoginEnabled = true;
 
-    username = savedAccount.username;
+    if (savedSession) {
+        sessionToken = savedSession.token;
+        sessionExpiresAt = savedSession.expires_at;
+        username = savedSession.username;
 
-    setStatus(false, "Connecting...");
+        // Chat oynasini darhol ko'rsatish
+        showChatImmediately(username);
+
+    } else {
+        legacyCredentials = savedAccount;
+        username = savedAccount.username;
+
+        showChatImmediately(username);
+    }
 
     try {
-        await connectAndAuthenticate("LOGIN", savedAccount);
+        if (savedSession) {
+            await authenticateWithSession();
+
+        } else {
+            // Eski versiyadagi parol orqali bir martalik login.
+            // Server token qaytarsa, WELCOME uni yangi kalitga saqlaydi.
+            await authenticateWithLegacyAccount();
+        }
 
         reconnectAttempts = 0;
 
     } catch (error) {
-        console.log("Automatic login failed:", error.message);
+        console.log("Automatic authentication failed:", error.message);
 
-        // If authentication was rejected, ask the user to log in again.
-        if (
-            error.message.includes("Incorrect username") ||
-            error.message.includes("already online")
-        ) {
-            removeSavedAccount();
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+
+        // Token yaroqsiz yoki muddati tugagan bo'lsa,
+        // login oynasiga qaytamiz.
+        if (savedSession) {
+            removeSavedSession();
             showLogin();
             showLoginForm();
 
             if (loginError) {
-                loginError.textContent = error.message;
+                loginError.textContent =
+                    "Your session has expired. Please sign in again.";
             }
+
         } else {
-            setStatus(false, "Reconnecting...");
-            scheduleReconnect();
+            const message = error.message.toLowerCase();
+
+            if (
+                message.includes("incorrect username") ||
+                message.includes("already online") ||
+                message.includes("invalid") ||
+                message.includes("password")
+            ) {
+                removeSavedSession();
+                showLogin();
+                showLoginForm();
+
+                if (loginError) {
+                    loginError.textContent = error.message;
+                }
+
+            } else {
+                setStatus(false, "Reconnecting...");
+                scheduleReconnect();
+            }
         }
     }
 }
@@ -857,6 +1050,8 @@ function leaveChat() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
 
+    updateSendAvailability();
+
     if (socket) {
         const oldSocket = socket;
         socket = null;
@@ -879,9 +1074,34 @@ function leaveChat() {
 // =====================================
 
 function logout() {
-    leaveChat();
+    manualDisconnect = true;
+    joined = false;
 
-    removeSavedAccount();
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+
+    // Serverdagi 30 kunlik sessiyani bekor qilish
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        try {
+            socket.send(JSON.stringify({
+                type: "LOGOUT",
+                token: sessionToken
+            }));
+        } catch (error) {
+            console.warn("Logout request error:", error);
+        }
+    }
+
+    const oldSocket = socket;
+    socket = null;
+
+    if (oldSocket) {
+        oldSocket.close();
+    }
+
+    removeSavedSession();
+
+    updateSendAvailability();
 
     if (loginPassword) loginPassword.value = "";
     if (loginUsername) loginUsername.value = "";
@@ -896,6 +1116,7 @@ function logout() {
 
     profileMenu?.classList.add("hidden");
 
+    showLogin();
     showLoginForm();
 }
 
@@ -973,5 +1194,6 @@ document.addEventListener("visibilitychange", () => {
 
 setStatus(false, "Offline");
 showLoginForm();
+updateSendAvailability();
 
 automaticLogin();
