@@ -1134,3 +1134,22 @@ textarea,
 button {
     font-size: 16px;
 }
+/* =========================================
+   IPHONE — PREVENT AUTOMATIC ZOOM
+   ========================================= */
+
+html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
+/* iPhone Safari input zoom fix */
+input,
+textarea {
+    font-size: 16px !important;
+}
+
+/* Keep original button text sizes */
+button {
+    -webkit-text-size-adjust: 100%;
+}
