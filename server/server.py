@@ -66,13 +66,17 @@ def hash_password(password):
     return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${password_hash}"
 
 
+
 def verify_password(password, stored_hash):
     try:
-        # New format:
+        # NEW FORMAT
         # pbkdf2_sha256$iterations$salt$hash
 
         if stored_hash.startswith("pbkdf2_sha256$"):
             parts = stored_hash.split("$")
+
+            if len(parts) != 4:
+                return False
 
             iterations = int(parts[1])
             salt = parts[2]
@@ -90,8 +94,27 @@ def verify_password(password, stored_hash):
                 expected_hash
             )
 
-        # Older format:
-        # salt:hash
+        # OLD FORMAT
+        # salt$hash (310000 iterations)
+
+        if "$" in stored_hash:
+            salt_hex, expected_hash = stored_hash.split("$", 1)
+            salt = bytes.fromhex(salt_hex)
+
+            actual_hash = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt,
+                310000
+            ).hex()
+
+            return hmac.compare_digest(
+                actual_hash,
+                expected_hash
+            )
+
+        # OLDER LEGACY FORMAT
+        # salt:hash (100000 iterations)
 
         if ":" in stored_hash:
             salt, expected_hash = stored_hash.split(":", 1)
@@ -112,6 +135,7 @@ def verify_password(password, stored_hash):
 
     except Exception:
         return False
+
 
 
 # =========================================
