@@ -12,15 +12,12 @@ from datetime import datetime, timedelta, timezone
 
 
 # =========================================
-# PYCHAT SERVER CONFIGURATION
+# PYCHAT CONFIGURATION
 # =========================================
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 8765))
-
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
-print("DATABASE URL EXISTS:", bool(DATABASE_URL))
 
 SESSION_DAYS = 30
 PBKDF2_ITERATIONS = 310000
@@ -34,11 +31,12 @@ db_pool = None
 # GENERAL HELPERS
 # =========================================
 
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
 def create_packet(packet_type, **kwargs):
-    return {
-        "type": packet_type,
-        **kwargs
-    }
+    return {"type": packet_type, **kwargs}
 
 
 async def send_json(websocket, data):
@@ -46,7 +44,7 @@ async def send_json(websocket, data):
         await websocket.send(json.dumps(data))
         return True
     except Exception as error:
-        print("SEND ERROR:", error)
+        print("SEND ERROR:", repr(error))
         return False
 
 
@@ -55,10 +53,6 @@ async def send_packet(websocket, packet_type, **kwargs):
         websocket,
         create_packet(packet_type, **kwargs)
     )
-
-
-def utc_now():
-    return datetime.now(timezone.utc)
 
 
 # =========================================
@@ -103,15 +97,18 @@ def hash_session_token(token):
 
 
 # =========================================
-# DATABASE
+# DATABASE INITIALIZATION
 # =========================================
-
 
 async def init_database():
     global db_pool
 
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not configured.")
+        raise RuntimeError(
+            "DATABASE_URL is missing in Render Environment."
+        )
+
+    print("CONNECTING TO POSTGRESQL...")
 
     db_pool = await asyncpg.create_pool(
         DATABASE_URL,
@@ -134,7 +131,7 @@ async def init_database():
             )
         """)
 
-        # ADD MISSING AVATAR COLUMN
+        # ADD AVATAR TO OLD USERS TABLE
         await connection.execute("""
             ALTER TABLE users
             ADD COLUMN IF NOT EXISTS avatar TEXT DEFAULT ''
@@ -144,7 +141,8 @@ async def init_database():
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                user_id INTEGER REFERENCES users(id)
+                    ON DELETE CASCADE,
                 token_hash TEXT UNIQUE NOT NULL,
                 expires_at TIMESTAMPTZ NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
@@ -161,20 +159,86 @@ async def init_database():
             )
         """)
 
-        print("DATABASE TABLES CHECKED")
+        # CHECK REQUIRED COLUMNS
+        required_columns = {
+            "users": [
+                "id",
+                "username",
+                "password_salt",
+                "password_hash",
+                "avatar",
+                "created_at"
+            ],
+            "sessions": [
+                "id",
+                "user_id",
+                "token_hash",
+                "expires_at",
+                "created_at"
+            ],
+            "messages": [
+                "id",
+                "username",
+                "message",
+                "created_at"
+            ]
+        }
+
+        for table, columns in required_columns.items():
+
+            existing = await connection.fetch(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = $1
+                """,
+                table
+            )
+
+            existing_names = {
+                row["column_name"] for row in existing
+            }
+
+            missing = [
+                column for column in columns
+                if column not in existing_names
+            ]
+
+            if missing:
+                raise RuntimeError(
+                    f"Database table '{table}' is missing "
+                    f"columns: {missing}"
+                )
+
+            print(
+                f"TABLE CHECKED: {table} - OK"
+            )
 
         avatar_exists = await connection.fetchval("""
             SELECT EXISTS (
                 SELECT 1
                 FROM information_schema.columns
-                WHERE table_name = 'users'
-                AND column_name = 'avatar'
+                WHERE table_schema = current_schema()
+                  AND table_name = 'users'
+                  AND column_name = 'avatar'
             )
         """)
 
         print("AVATAR COLUMN EXISTS:", avatar_exists)
 
-    print("DATABASE INITIALIZED")
+        if not avatar_exists:
+            raise RuntimeError(
+                "The users.avatar column is still missing."
+            )
+
+        user_count = await connection.fetchval(
+            "SELECT COUNT(*) FROM users"
+        )
+
+        print("EXISTING USERS:", user_count)
+
+    print("DATABASE INITIALIZED SUCCESSFULLY")
 
 
 # =========================================
@@ -196,35 +260,28 @@ async def broadcast_packet(packet):
     if not sockets:
         return
 
-    results = await asyncio.gather(
+    await asyncio.gather(
         *[
-            send_json(websocket, packet)
-            for websocket in sockets
+            send_json(socket, packet)
+            for socket in sockets
         ],
         return_exceptions=True
     )
-
-    for result in results:
-        if isinstance(result, Exception):
-            print("BROADCAST ERROR:", result)
 
 
 async def update_users():
     users = await online_users()
 
-    print("================================")
-    print("UPDATING ONLINE USERS")
-    print("USERS:", users)
-    print("COUNT:", len(users))
-    print("================================")
+    print("ONLINE USERS:", users)
+    print("ONLINE COUNT:", len(users))
 
-    packet = create_packet(
-        "USERS",
-        users=users,
-        count=len(users)
+    await broadcast_packet(
+        create_packet(
+            "USERS",
+            users=users,
+            count=len(users)
+        )
     )
-
-    await broadcast_packet(packet)
 
 
 async def register_connection(
@@ -248,11 +305,8 @@ async def register_connection(
             "token_hash": token_hash
         }
 
-        print("================================")
         print("USER CONNECTED:", username)
-        print("ONLINE USERS:", list(clients.keys()))
-        print("ONLINE COUNT:", len(clients))
-        print("================================")
+        print("ONLINE:", list(clients.keys()))
 
     if old_websocket and old_websocket != websocket:
         try:
@@ -261,7 +315,7 @@ async def register_connection(
                 reason="New connection established."
             )
         except Exception as error:
-            print("OLD CONNECTION CLOSE ERROR:", error)
+            print("OLD CONNECTION ERROR:", repr(error))
 
 
 async def remove_connection(websocket, username):
@@ -278,12 +332,8 @@ async def remove_connection(websocket, username):
             del clients[username]
             removed = True
 
-        print("================================")
         print("CONNECTION CLOSED:", username)
         print("REMOVED:", removed)
-        print("REMAINING ONLINE:", list(clients.keys()))
-        print("ONLINE COUNT:", len(clients))
-        print("================================")
 
     if removed:
         await update_users()
@@ -297,7 +347,13 @@ async def get_user(username):
     async with db_pool.acquire() as connection:
         return await connection.fetchrow(
             """
-            SELECT *
+            SELECT
+                id,
+                username,
+                password_salt,
+                password_hash,
+                avatar,
+                created_at
             FROM users
             WHERE username = $1
             """,
@@ -310,22 +366,27 @@ async def create_user(username, password):
 
     async with db_pool.acquire() as connection:
         try:
-            user = await connection.fetchrow(
+            return await connection.fetchrow(
                 """
                 INSERT INTO users (
                     username,
                     password_salt,
-                    password_hash
+                    password_hash,
+                    avatar
                 )
-                VALUES ($1, $2, $3)
-                RETURNING *
+                VALUES ($1, $2, $3, '')
+                RETURNING
+                    id,
+                    username,
+                    password_salt,
+                    password_hash,
+                    avatar,
+                    created_at
                 """,
                 username,
                 salt,
                 password_hash
             )
-
-            return user
 
         except asyncpg.UniqueViolationError:
             return None
@@ -352,7 +413,9 @@ async def save_session(user_id):
     token = create_session_token()
     token_hash = hash_session_token(token)
 
-    expires_at = utc_now() + timedelta(days=SESSION_DAYS)
+    expires_at = utc_now() + timedelta(
+        days=SESSION_DAYS
+    )
 
     async with db_pool.acquire() as connection:
         await connection.execute(
@@ -430,20 +493,22 @@ async def delete_user_sessions(user_id):
 
 async def save_message(username, message):
     async with db_pool.acquire() as connection:
-        row = await connection.fetchrow(
+        return await connection.fetchrow(
             """
             INSERT INTO messages (
                 username,
                 message
             )
             VALUES ($1, $2)
-            RETURNING id, username, message, created_at
+            RETURNING
+                id,
+                username,
+                message,
+                created_at
             """,
             username,
             message
         )
-
-    return row
 
 
 async def get_message_history(limit=100):
@@ -465,22 +530,18 @@ async def get_message_history(limit=100):
     return list(reversed(rows))
 
 
-# =========================================
-# HISTORY
-# =========================================
-
 async def send_history(websocket):
     messages = await get_message_history()
 
-    history = []
-
-    for row in messages:
-        history.append({
+    history = [
+        {
             "id": row["id"],
             "username": row["username"],
             "message": row["message"],
             "time": row["created_at"].isoformat()
-        })
+        }
+        for row in messages
+    ]
 
     await send_packet(
         websocket,
@@ -490,7 +551,7 @@ async def send_history(websocket):
 
 
 # =========================================
-# AUTHENTICATION
+# AUTHENTICATION SUCCESS
 # =========================================
 
 async def finish_authentication(
@@ -501,34 +562,40 @@ async def finish_authentication(
     expires_at
 ):
     username = user["username"]
-    user_id = user["id"]
 
     await register_connection(
         websocket,
         username,
-        user_id,
+        user["id"],
         token_hash
     )
 
-    await send_packet(
+    sent = await send_packet(
         websocket,
         "WELCOME",
         username=username,
-        user_id=user_id,
+        user_id=user["id"],
         token=token,
         expires_at=expires_at.isoformat(),
         avatar=user["avatar"] or ""
     )
 
-    await send_history(websocket)
+    if not sent:
+        raise RuntimeError(
+            "Could not send WELCOME packet."
+        )
 
+    await send_history(websocket)
     await update_users()
 
     print("AUTHENTICATION SUCCESS:", username)
 
 
+# =========================================
+# AUTHENTICATION
+# =========================================
+
 async def authenticate_connection(websocket):
-    username = None
 
     try:
         raw_message = await asyncio.wait_for(
@@ -537,6 +604,10 @@ async def authenticate_connection(websocket):
         )
 
         packet = json.loads(raw_message)
+
+        if not isinstance(packet, dict):
+            raise ValueError("Invalid authentication packet.")
+
         packet_type = packet.get("type")
 
         # ---------------------------------
@@ -574,7 +645,7 @@ async def authenticate_connection(websocket):
                 password
             )
 
-            if not user:
+            if user is None:
                 await send_packet(
                     websocket,
                     "ERROR",
@@ -613,6 +684,8 @@ async def authenticate_connection(websocket):
             user = await get_user(username)
 
             if not user:
+                print("LOGIN FAILED: USER NOT FOUND:", username)
+
                 await send_packet(
                     websocket,
                     "ERROR",
@@ -625,6 +698,8 @@ async def authenticate_connection(websocket):
                 user["password_salt"],
                 user["password_hash"]
             ):
+                print("LOGIN FAILED: WRONG PASSWORD:", username)
+
                 await send_packet(
                     websocket,
                     "ERROR",
@@ -659,7 +734,7 @@ async def authenticate_connection(websocket):
             if not token:
                 await send_packet(
                     websocket,
-                    "ERROR",
+                    "AUTH_REQUIRED",
                     message="Session token is missing."
                 )
                 return None
@@ -677,7 +752,7 @@ async def authenticate_connection(websocket):
             user = {
                 "id": session["user_id"],
                 "username": session["username"],
-                "avatar": session["avatar"]
+                "avatar": session["avatar"] or ""
             }
 
             await finish_authentication(
@@ -731,7 +806,6 @@ async def handle_client(websocket):
     print("NEW WEBSOCKET CONNECTION")
 
     try:
-
         username = await authenticate_connection(websocket)
 
         if not username:
@@ -742,7 +816,10 @@ async def handle_client(websocket):
             try:
                 packet = json.loads(raw_message)
 
-            except json.JSONDecodeError:
+                if not isinstance(packet, dict):
+                    raise ValueError("Packet must be an object.")
+
+            except Exception:
                 await send_packet(
                     websocket,
                     "ERROR",
@@ -752,10 +829,7 @@ async def handle_client(websocket):
 
             packet_type = packet.get("type")
 
-            # ---------------------------------
             # MESSAGE
-            # ---------------------------------
-
             if packet_type == "MESSAGE":
 
                 message = str(
@@ -778,20 +852,17 @@ async def handle_client(websocket):
                     message
                 )
 
-                message_packet = create_packet(
-                    "MESSAGE",
-                    id=row["id"],
-                    username=row["username"],
-                    message=row["message"],
-                    time=row["created_at"].isoformat()
+                await broadcast_packet(
+                    create_packet(
+                        "MESSAGE",
+                        id=row["id"],
+                        username=row["username"],
+                        message=row["message"],
+                        time=row["created_at"].isoformat()
+                    )
                 )
 
-                await broadcast_packet(message_packet)
-
-            # ---------------------------------
             # PING
-            # ---------------------------------
-
             elif packet_type == "PING":
 
                 await send_packet(
@@ -799,20 +870,10 @@ async def handle_client(websocket):
                     "PONG"
                 )
 
-            # ---------------------------------
             # USERS
-            # ---------------------------------
-
             elif packet_type == "USERS":
 
                 users = await online_users()
-
-                print("================================")
-                print("USERS REQUEST RECEIVED")
-                print("REQUEST FROM:", username)
-                print("ONLINE USERS:", users)
-                print("ONLINE COUNT:", len(users))
-                print("================================")
 
                 await send_packet(
                     websocket,
@@ -821,25 +882,18 @@ async def handle_client(websocket):
                     count=len(users)
                 )
 
-            # ---------------------------------
             # LEAVE
-            # ---------------------------------
-
             elif packet_type == "LEAVE":
 
-                print("USER REQUESTED LEAVE:", username)
+                print("USER LEFT:", username)
 
                 await websocket.close(
                     code=1000,
                     reason="User left."
                 )
-
                 break
 
-            # ---------------------------------
             # LOGOUT
-            # ---------------------------------
-
             elif packet_type == "LOGOUT":
 
                 async with clients_lock:
@@ -854,11 +908,9 @@ async def handle_client(websocket):
                     code=1000,
                     reason="User logged out."
                 )
-
                 break
 
             else:
-
                 await send_packet(
                     websocket,
                     "ERROR",
@@ -866,21 +918,12 @@ async def handle_client(websocket):
                 )
 
     except websockets.exceptions.ConnectionClosed as error:
-        print(
-            "WEBSOCKET CLOSED:",
-            username,
-            error
-        )
+        print("WEBSOCKET CLOSED:", username, repr(error))
 
     except Exception as error:
-        print(
-            "CLIENT HANDLER ERROR:",
-            username,
-            repr(error)
-        )
+        print("CLIENT HANDLER ERROR:", username, repr(error))
 
     finally:
-
         await remove_connection(
             websocket,
             username
@@ -891,7 +934,6 @@ async def handle_client(websocket):
 # SERVER START
 # =========================================
 
-
 async def main():
     print("================================")
     print("PYCHAT SERVER STARTING")
@@ -900,7 +942,6 @@ async def main():
 
     try:
         await init_database()
-        print("DATABASE INITIALIZED SUCCESSFULLY")
 
     except Exception as error:
         print("DATABASE INITIALIZATION FAILED:", repr(error))
@@ -910,20 +951,30 @@ async def main():
     print("HOST:", HOST)
     print("PORT:", PORT)
     print("SESSION DAYS:", SESSION_DAYS)
+    print("PYCHAT SERVER IS STARTING...")
     print("================================")
 
-    async with websockets.serve(
-        handle_client,
-        HOST,
-        PORT,
-        max_size=64 * 1024,
-        ping_interval=20,
-        ping_timeout=20
-    ):
-        print("PYCHAT SERVER IS RUNNING")
-        await asyncio.Future()
+    try:
+        async with websockets.serve(
+            handle_client,
+            HOST,
+            PORT,
+            max_size=64 * 1024,
+            ping_interval=20,
+            ping_timeout=20
+        ):
+            print("PYCHAT SERVER IS RUNNING")
+            await asyncio.Future()
+
+    finally:
+        if db_pool:
+            await db_pool.close()
+            print("DATABASE POOL CLOSED")
 
 
+# =========================================
+# RUN SERVER
+# =========================================
 
 if __name__ == "__main__":
 
