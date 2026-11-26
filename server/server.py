@@ -859,6 +859,7 @@ async def handle_client(websocket):
             print(f"{username} disconnected.")
 
 
+
 # =========================================
 # MAIN SERVER
 # =========================================
@@ -874,7 +875,7 @@ async def main():
     print(f"Session duration: {SESSION_DAYS} days")
     print("----------------------------------")
 
-    async with websockets.asyncio.server.serve(
+    async with websockets.serve(
         handle_client,
         HOST,
         PORT,
