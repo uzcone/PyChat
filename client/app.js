@@ -1,9 +1,9 @@
 const WS_URL = "wss://pychat-8gdk.onrender.com";
 const SESSION_STORAGE_KEY = "pychat_session_token";
 
-// DOM Elements (safe lookup)
+// DOM Elements
 const statusDot = document.getElementById("statusDot");
-const connectionText = document.getElementById("connectionText");
+const connectionStatusEl = document.getElementById("connectionStatus");
 
 const loginScreen = document.getElementById("loginScreen");
 const chatScreen = document.getElementById("chatScreen");
@@ -12,42 +12,43 @@ const loginForm = document.getElementById("loginForm");
 const loginUsernameInput = document.getElementById("loginUsername");
 const loginPasswordInput = document.getElementById("loginPassword");
 const toggleLoginPasswordBtn = document.getElementById("toggleLoginPassword");
-const loginSubmitBtn = document.getElementById("loginSubmit");
+const loginButton = document.getElementById("loginButton");
 const loginErrorEl = document.getElementById("loginError");
-const showRegisterBtn = document.getElementById("showRegisterBtn");
+const showRegisterBtn = document.getElementById("showRegister");
 
 const registerForm = document.getElementById("registerForm");
 const registerUsernameInput = document.getElementById("registerUsername");
 const registerPasswordInput = document.getElementById("registerPassword");
+const confirmPasswordInput = document.getElementById("confirmPassword");
 const toggleRegisterPasswordBtn = document.getElementById("toggleRegisterPassword");
-const registerSubmitBtn = document.getElementById("registerSubmit");
+const registerButton = document.getElementById("registerButton");
 const registerErrorEl = document.getElementById("registerError");
-const showLoginBtn = document.getElementById("showLoginBtn");
+const showLoginBtn = document.getElementById("showLogin");
 
-const profileAvatarEl = document.getElementById("profileAvatar");
-const profileAvatarImageEl = document.getElementById("profileAvatarImage");
-const profileUsernameEl = document.getElementById("profileUsername");
-const profileMenuBtn = document.getElementById("profileMenuBtn");
+const myAvatarEl = document.getElementById("myAvatar");
+const myAvatarImageEl = document.getElementById("myAvatarImage");
+const myUsernameEl = document.getElementById("myUsername");
+const profileMenuButton = document.getElementById("profileMenuButton");
 const profileMenuEl = document.getElementById("profileMenu");
 const logoutButton = document.getElementById("logoutButton");
 
-const searchInput = document.getElementById("searchInput");
+const userSearchInput = document.getElementById("userSearch");
 const conversationListEl = document.getElementById("conversationList");
-const onlineUserListEl = document.getElementById("onlineUserList");
-const onlineCountLabelEl = document.getElementById("onlineCountLabel");
+const userListEl = document.getElementById("userList");
+const userCountEl = document.getElementById("userCount");
 
 const topOnlineUsersEl = document.getElementById("topOnlineUsers");
 const topOnlineCountEl = document.getElementById("topOnlineCount");
 const onlineNowUsersEl = document.getElementById("onlineNowUsers");
 const onlineNowCountEl = document.getElementById("onlineNowCount");
 
-const chatContactAvatarEl = document.getElementById("chatContactAvatar");
-const chatHeadingEl = document.getElementById("chatHeading");
+const chatAvatarEl = document.getElementById("chatAvatar");
+const chatTitleEl = document.getElementById("chatTitle");
 const chatSubtitleEl = document.getElementById("chatSubtitle");
-const leaveRoomBtn = document.getElementById("leaveRoomBtn");
+const leaveButton = document.getElementById("leaveButton");
 
 const messagesContainer = document.getElementById("messages");
-const emptyStateEl = document.getElementById("emptyState");
+const emptyStateEl = document.querySelector("#messages .empty-state");
 const messageInput = document.getElementById("messageInput");
 const sendButton = document.getElementById("sendButton");
 const attachButton = document.getElementById("attachButton");
@@ -60,7 +61,7 @@ let pingTimer = null;
 let currentUser = null;
 let joined = false;
 let onlineUsers = [];
-let activeChat = "general"; // "general" or lowercase username
+let activeChat = "general";
 let conversations = {
     general: []
 };
@@ -70,15 +71,22 @@ function normalizeUser(name) {
 }
 
 function formatTime(isoString) {
-    if (!isoString) return "";
+    if (!isoString) {
+        return "";
+    }
     const date = new Date(isoString);
-    if (Number.isNaN(date.getTime())) return "";
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (Number.isNaN(date.getTime())) {
+        return "";
+    }
+    return date.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit"
+    });
 }
 
 function setConnectionStatus(state, label) {
-    if (connectionText) {
-        connectionText.textContent = label;
+    if (connectionStatusEl) {
+        connectionStatusEl.textContent = label;
     }
     if (statusDot) {
         statusDot.classList.remove("online");
@@ -89,20 +97,39 @@ function setConnectionStatus(state, label) {
 }
 
 function updateSendAvailability() {
-    const canSend = Boolean(socket && socket.readyState === WebSocket.OPEN && currentUser && joined);
-    if (messageInput) messageInput.disabled = !canSend;
-    if (sendButton) sendButton.disabled = !canSend;
-    if (attachButton) attachButton.disabled = !canSend;
+    const canSend = Boolean(
+        socket &&
+        socket.readyState === WebSocket.OPEN &&
+        currentUser &&
+        joined
+    );
+    if (messageInput) {
+        messageInput.disabled = !canSend;
+    }
+    if (sendButton) {
+        sendButton.disabled = !canSend;
+    }
+    if (attachButton) {
+        attachButton.disabled = !canSend;
+    }
 }
 
 function resetAuthButtons() {
-    if (loginSubmitBtn) loginSubmitBtn.disabled = false;
-    if (registerSubmitBtn) registerSubmitBtn.disabled = false;
+    if (loginButton) {
+        loginButton.disabled = false;
+    }
+    if (registerButton) {
+        registerButton.disabled = false;
+    }
 }
 
 function showAuthScreen() {
-    if (loginScreen) loginScreen.classList.remove("hidden");
-    if (chatScreen) chatScreen.classList.add("hidden");
+    if (loginScreen) {
+        loginScreen.classList.remove("hidden");
+    }
+    if (chatScreen) {
+        chatScreen.classList.add("hidden");
+    }
     joined = false;
     resetAuthButtons();
     updateSendAvailability();
@@ -110,14 +137,24 @@ function showAuthScreen() {
 
 function showChatScreen(username) {
     currentUser = username;
-    if (loginScreen) loginScreen.classList.add("hidden");
-    if (chatScreen) chatScreen.classList.remove("hidden");
+    if (loginScreen) {
+        loginScreen.classList.add("hidden");
+    }
+    if (chatScreen) {
+        chatScreen.classList.remove("hidden");
+    }
     resetAuthButtons();
 
     const initial = (username[0] || "U").toUpperCase();
-    if (profileAvatarEl) profileAvatarEl.textContent = initial;
-    if (profileUsernameEl) profileUsernameEl.textContent = username;
-    if (profileAvatarImageEl) profileAvatarImageEl.classList.add("hidden");
+    if (myAvatarEl) {
+        myAvatarEl.textContent = initial;
+    }
+    if (myUsernameEl) {
+        myUsernameEl.textContent = username;
+    }
+    if (myAvatarImageEl) {
+        myAvatarImageEl.classList.add("hidden");
+    }
 
     switchChat("general");
 }
@@ -145,18 +182,36 @@ function switchChat(targetKey) {
     ensureConversation(activeChat);
 
     if (activeChat === "general") {
-        if (chatContactAvatarEl) chatContactAvatarEl.textContent = "P";
-        if (chatHeadingEl) chatHeadingEl.textContent = "General Chat";
-        if (chatSubtitleEl) chatSubtitleEl.textContent = "Welcome to the PyChat community";
-        if (leaveRoomBtn) leaveRoomBtn.classList.add("hidden");
-    } else {
-        if (chatContactAvatarEl) chatContactAvatarEl.textContent = (activeChat[0] || "U").toUpperCase();
-        if (chatHeadingEl) chatHeadingEl.textContent = activeChat;
-        const isOnline = onlineUsers.some((u) => normalizeUser(u) === activeChat);
-        if (chatSubtitleEl) {
-            chatSubtitleEl.textContent = isOnline ? "Private chat • Online" : "Private chat • Offline";
+        if (chatAvatarEl) {
+            chatAvatarEl.textContent = "P";
         }
-        if (leaveRoomBtn) leaveRoomBtn.classList.remove("hidden");
+        if (chatTitleEl) {
+            chatTitleEl.textContent = "General Chat";
+        }
+        if (chatSubtitleEl) {
+            chatSubtitleEl.textContent = "Welcome to the PyChat community";
+        }
+        if (leaveButton) {
+            leaveButton.classList.add("hidden");
+        }
+    } else {
+        if (chatAvatarEl) {
+            chatAvatarEl.textContent = (activeChat[0] || "U").toUpperCase();
+        }
+        if (chatTitleEl) {
+            chatTitleEl.textContent = activeChat;
+        }
+        const isOnline = onlineUsers.some(
+            (u) => normalizeUser(u) === activeChat
+        );
+        if (chatSubtitleEl) {
+            chatSubtitleEl.textContent = isOnline
+                ? "Private chat • Online"
+                : "Private chat • Offline";
+        }
+        if (leaveButton) {
+            leaveButton.classList.remove("hidden");
+        }
     }
 
     renderConversationsSidebar();
@@ -164,8 +219,12 @@ function switchChat(targetKey) {
 }
 
 function renderConversationsSidebar() {
-    if (!conversationListEl) return;
-    const query = (searchInput?.value || "").trim().toLowerCase();
+    if (!conversationListEl) {
+        return;
+    }
+    const query = (userSearchInput ? userSearchInput.value : "")
+        .trim()
+        .toLowerCase();
     conversationListEl.innerHTML = "";
 
     const keys = Object.keys(conversations).filter((k) => k !== "general");
@@ -177,32 +236,49 @@ function renderConversationsSidebar() {
         (peer) => !query || peer.includes(query)
     );
 
-    const generalItem = document.createElement("li");
-    generalItem.className = `online-user-item ${activeChat === "general" ? "active" : ""}`;
-    generalItem.style.cursor = "pointer";
-    generalItem.innerHTML = `
-        <span class="user-avatar">P</span>
-        <span class="online-user-label">General Chat</span>
-    `;
-    generalItem.addEventListener("click", () => switchChat("general"));
-    conversationListEl.appendChild(generalItem);
+    const generalLi = document.createElement("li");
+    generalLi.className = `online-user-item ${activeChat === "general" ? "active" : ""}`;
+    generalLi.style.cursor = "pointer";
+
+    const generalAvatar = document.createElement("span");
+    generalAvatar.className = "user-avatar";
+    generalAvatar.textContent = "P";
+
+    const generalLabel = document.createElement("span");
+    generalLabel.className = "online-user-label";
+    generalLabel.textContent = "General Chat";
+
+    generalLi.appendChild(generalAvatar);
+    generalLi.appendChild(generalLabel);
+    generalLi.addEventListener("click", () => switchChat("general"));
+    conversationListEl.appendChild(generalLi);
 
     allPeers.forEach((peer) => {
         const li = document.createElement("li");
         li.className = `online-user-item ${activeChat === peer ? "active" : ""}`;
         li.style.cursor = "pointer";
-        li.innerHTML = `
-            <span class="user-avatar">${(peer[0] || "U").toUpperCase()}</span>
-            <span class="online-user-label">${peer}</span>
-        `;
+
+        const avatar = document.createElement("span");
+        avatar.className = "user-avatar";
+        avatar.textContent = (peer[0] || "U").toUpperCase();
+
+        const label = document.createElement("span");
+        label.className = "online-user-label";
+        label.textContent = peer;
+
+        li.appendChild(avatar);
+        li.appendChild(label);
         li.addEventListener("click", () => switchChat(peer));
         conversationListEl.appendChild(li);
     });
 }
 
 function appendMention(username) {
-    if (!messageInput || messageInput.disabled) return;
-    const prefix = messageInput.value && !messageInput.value.endsWith(" ") ? " " : "";
+    if (!messageInput || messageInput.disabled) {
+        return;
+    }
+    const prefix =
+        messageInput.value && !messageInput.value.endsWith(" ") ? " " : "";
     messageInput.value = `${messageInput.value}${prefix}@${username} `;
     messageInput.focus();
 }
@@ -255,62 +331,99 @@ function createOnlineChip(username, compact = false) {
 
 function renderOnlineUsers(users) {
     onlineUsers = Array.isArray(users) ? users : [];
-    const query = (searchInput?.value || "").trim().toLowerCase();
-    const filtered = onlineUsers.filter((u) => !query || u.toLowerCase().includes(query));
-    const countText = `${onlineUsers.length} online`;
+    const query = (userSearchInput ? userSearchInput.value : "")
+        .trim()
+        .toLowerCase();
+    const filtered = onlineUsers.filter(
+        (u) => !query || u.toLowerCase().includes(query)
+    );
+    const countLabel = `${onlineUsers.length} online`;
 
-    if (topOnlineCountEl) topOnlineCountEl.textContent = countText;
-    if (onlineNowCountEl) onlineNowCountEl.textContent = countText;
-    if (onlineCountLabelEl) onlineCountLabelEl.textContent = String(onlineUsers.length);
+    if (userCountEl) {
+        userCountEl.textContent = String(onlineUsers.length);
+    }
+    if (topOnlineCountEl) {
+        topOnlineCountEl.textContent = String(onlineUsers.length);
+    }
+    if (onlineNowCountEl) {
+        onlineNowCountEl.textContent = countLabel;
+    }
 
     if (topOnlineUsersEl) {
         topOnlineUsersEl.innerHTML = "";
         if (!filtered.length) {
-            topOnlineUsersEl.innerHTML = `<span class="top-online-empty">No one online right now</span>`;
+            const emptySpan = document.createElement("span");
+            emptySpan.className = "top-online-empty";
+            emptySpan.textContent = "No one online right now";
+            topOnlineUsersEl.appendChild(emptySpan);
         } else {
-            filtered.forEach((u) => topOnlineUsersEl.appendChild(createOnlineChip(u, false)));
+            filtered.forEach((u) => {
+                topOnlineUsersEl.appendChild(createOnlineChip(u, false));
+            });
         }
     }
 
     if (onlineNowUsersEl) {
         onlineNowUsersEl.innerHTML = "";
         if (!filtered.length) {
-            onlineNowUsersEl.innerHTML = `<span class="top-online-empty">No one online right now</span>`;
+            const emptySpan = document.createElement("span");
+            emptySpan.className = "top-online-empty";
+            emptySpan.textContent = "Hozircha online foydalanuvchilar yo‘q";
+            onlineNowUsersEl.appendChild(emptySpan);
         } else {
-            filtered.forEach((u) => onlineNowUsersEl.appendChild(createOnlineChip(u, true)));
+            filtered.forEach((u) => {
+                onlineNowUsersEl.appendChild(createOnlineChip(u, true));
+            });
         }
     }
 
-    if (onlineUserListEl) {
-        onlineUserListEl.innerHTML = "";
+    if (userListEl) {
+        userListEl.innerHTML = "";
         filtered.forEach((u) => {
             const li = document.createElement("li");
             li.className = "online-user-item";
             li.style.cursor = "pointer";
-            li.innerHTML = `
-                <span class="user-avatar">${(u[0] || "U").toUpperCase()}</span>
-                <span class="online-user-label">${u}</span>
-                <span class="online-indicator"></span>
-            `;
+
+            const avatar = document.createElement("span");
+            avatar.className = "user-avatar";
+            avatar.textContent = (u[0] || "U").toUpperCase();
+
+            const label = document.createElement("span");
+            label.className = "online-user-label";
+            label.textContent = u;
+
+            const dot = document.createElement("span");
+            dot.className = "online-indicator";
+
+            li.appendChild(avatar);
+            li.appendChild(label);
+            li.appendChild(dot);
+
             li.addEventListener("click", () => {
                 if (normalizeUser(u) !== normalizeUser(currentUser)) {
                     switchChat(normalizeUser(u));
                 }
             });
-            onlineUserListEl.appendChild(li);
+            userListEl.appendChild(li);
         });
     }
 
     if (activeChat !== "general" && chatSubtitleEl) {
-        const isOnline = onlineUsers.some((u) => normalizeUser(u) === activeChat);
-        chatSubtitleEl.textContent = isOnline ? "Private chat • Online" : "Private chat • Offline";
+        const isOnline = onlineUsers.some(
+            (u) => normalizeUser(u) === activeChat
+        );
+        chatSubtitleEl.textContent = isOnline
+            ? "Private chat • Online"
+            : "Private chat • Offline";
     }
 
     renderConversationsSidebar();
 }
 
 function appendMessageElement(msg) {
-    if (!messagesContainer) return;
+    if (!messagesContainer) {
+        return;
+    }
     if (emptyStateEl) {
         emptyStateEl.classList.add("hidden");
     }
@@ -364,7 +477,9 @@ function appendMessageElement(msg) {
 }
 
 function renderActiveMessages() {
-    if (!messagesContainer) return;
+    if (!messagesContainer) {
+        return;
+    }
     const list = ensureConversation(activeChat);
     messagesContainer.innerHTML = "";
 
@@ -402,9 +517,14 @@ function sendJson(payload) {
 }
 
 function sendCurrentMessage(customContent = null) {
-    if (!joined || !currentUser || !messageInput) return;
-    const text = customContent !== null ? customContent : messageInput.value.trim();
-    if (!text) return;
+    if (!joined || !currentUser || !messageInput) {
+        return;
+    }
+    const text =
+        customContent !== null ? customContent : messageInput.value.trim();
+    if (!text) {
+        return;
+    }
 
     const payload = {
         type: "MESSAGE",
@@ -419,7 +539,11 @@ function sendCurrentMessage(customContent = null) {
 }
 
 function connectSocket() {
-    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    if (
+        socket &&
+        (socket.readyState === WebSocket.OPEN ||
+            socket.readyState === WebSocket.CONNECTING)
+    ) {
         return;
     }
 
@@ -455,15 +579,25 @@ function connectSocket() {
                 if (data.token) {
                     localStorage.setItem(SESSION_STORAGE_KEY, data.token);
                 }
-                if (loginErrorEl) loginErrorEl.textContent = "";
-                if (registerErrorEl) registerErrorEl.textContent = "";
+                if (loginErrorEl) {
+                    loginErrorEl.textContent = "";
+                }
+                if (registerErrorEl) {
+                    registerErrorEl.textContent = "";
+                }
                 conversations = { general: [] };
                 showChatScreen(data.username);
                 break;
 
             case "AUTH_ERROR":
-                if (loginErrorEl) loginErrorEl.textContent = data.message || "Authentication failed.";
-                if (registerErrorEl) registerErrorEl.textContent = data.message || "Registration failed.";
+                if (loginErrorEl) {
+                    loginErrorEl.textContent =
+                        data.message || "Authentication failed.";
+                }
+                if (registerErrorEl) {
+                    registerErrorEl.textContent =
+                        data.message || "Registration failed.";
+                }
                 resetAuthButtons();
                 break;
 
@@ -498,7 +632,9 @@ function connectSocket() {
             case "MESSAGE_DELETED": {
                 const targetId = data.id;
                 Object.keys(conversations).forEach((key) => {
-                    conversations[key] = conversations[key].filter((m) => m.id !== targetId);
+                    conversations[key] = conversations[key].filter(
+                        (m) => m.id !== targetId
+                    );
                 });
                 renderActiveMessages();
                 break;
@@ -528,130 +664,212 @@ function connectSocket() {
 }
 
 // Auth UI Events
-showRegisterBtn?.addEventListener("click", () => {
-    loginForm?.classList.add("hidden");
-    registerForm?.classList.remove("hidden");
-    if (loginErrorEl) loginErrorEl.textContent = "";
-    if (registerErrorEl) registerErrorEl.textContent = "";
-});
+if (showRegisterBtn) {
+    showRegisterBtn.addEventListener("click", () => {
+        if (loginForm) {
+            loginForm.classList.add("hidden");
+        }
+        if (registerForm) {
+            registerForm.classList.remove("hidden");
+        }
+        if (loginErrorEl) {
+            loginErrorEl.textContent = "";
+        }
+        if (registerErrorEl) {
+            registerErrorEl.textContent = "";
+        }
+    });
+}
 
-showLoginBtn?.addEventListener("click", () => {
-    registerForm?.classList.add("hidden");
-    loginForm?.classList.remove("hidden");
-    if (loginErrorEl) loginErrorEl.textContent = "";
-    if (registerErrorEl) registerErrorEl.textContent = "";
-});
+if (showLoginBtn) {
+    showLoginBtn.addEventListener("click", () => {
+        if (registerForm) {
+            registerForm.classList.add("hidden");
+        }
+        if (loginForm) {
+            loginForm.classList.remove("hidden");
+        }
+        if (loginErrorEl) {
+            loginErrorEl.textContent = "";
+        }
+        if (registerErrorEl) {
+            registerErrorEl.textContent = "";
+        }
+    });
+}
 
-toggleLoginPasswordBtn?.addEventListener("click", () => {
-    if (!loginPasswordInput) return;
-    const isPass = loginPasswordInput.type === "password";
-    loginPasswordInput.type = isPass ? "text" : "password";
-    toggleLoginPasswordBtn.textContent = isPass ? "Hide" : "Show";
-});
+if (toggleLoginPasswordBtn) {
+    toggleLoginPasswordBtn.addEventListener("click", () => {
+        if (!loginPasswordInput) {
+            return;
+        }
+        const isPass = loginPasswordInput.type === "password";
+        loginPasswordInput.type = isPass ? "text" : "password";
+        toggleLoginPasswordBtn.textContent = isPass ? "Hide" : "Show";
+    });
+}
 
-toggleRegisterPasswordBtn?.addEventListener("click", () => {
-    if (!registerPasswordInput) return;
-    const isPass = registerPasswordInput.type === "password";
-    registerPasswordInput.type = isPass ? "text" : "password";
-    toggleRegisterPasswordBtn.textContent = isPass ? "Hide" : "Show";
-});
+if (toggleRegisterPasswordBtn) {
+    toggleRegisterPasswordBtn.addEventListener("click", () => {
+        if (!registerPasswordInput) {
+            return;
+        }
+        const isPass = registerPasswordInput.type === "password";
+        registerPasswordInput.type = isPass ? "text" : "password";
+        toggleRegisterPasswordBtn.textContent = isPass ? "Hide" : "Show";
+    });
+}
 
-loginForm?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    if (loginErrorEl) loginErrorEl.textContent = "";
-    const username = (loginUsernameInput?.value || "").trim();
-    const password = loginPasswordInput?.value || "";
-    if (!username || !password) {
-        if (loginErrorEl) loginErrorEl.textContent = "Username va parolni kiriting.";
-        return;
-    }
-    if (!sendJson({ type: "LOGIN", username, password })) {
-        if (loginErrorEl) loginErrorEl.textContent = "Server bilan aloqa yo'q. Qayta ulanilmoqda...";
-        connectSocket();
-    }
-});
+if (loginForm) {
+    loginForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        if (loginErrorEl) {
+            loginErrorEl.textContent = "";
+        }
+        const username = (loginUsernameInput ? loginUsernameInput.value : "").trim();
+        const password = loginPasswordInput ? loginPasswordInput.value : "";
 
-registerForm?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    if (registerErrorEl) registerErrorEl.textContent = "";
-    const username = (registerUsernameInput?.value || "").trim();
-    const password = registerPasswordInput?.value || "";
-    if (!username || password.length < 8) {
-        if (registerErrorEl) registerErrorEl.textContent = "Username kiriting va parol kamida 8 belgi bo'lsin.";
-        return;
-    }
-    if (!sendJson({ type: "REGISTER", username, password })) {
-        if (registerErrorEl) registerErrorEl.textContent = "Server bilan aloqa yo'q. Qayta ulanilmoqda...";
-        connectSocket();
-    }
-});
+        if (!username || !password) {
+            if (loginErrorEl) {
+                loginErrorEl.textContent = "Username va parolni kiriting.";
+            }
+            return;
+        }
+        if (!sendJson({ type: "LOGIN", username, password })) {
+            if (loginErrorEl) {
+                loginErrorEl.textContent =
+                    "Server bilan aloqa yo'q. Qayta ulanilmoqda...";
+            }
+            connectSocket();
+        }
+    });
+}
+
+if (registerForm) {
+    registerForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        if (registerErrorEl) {
+            registerErrorEl.textContent = "";
+        }
+        const username = (
+            registerUsernameInput ? registerUsernameInput.value : ""
+        ).trim();
+        const password = registerPasswordInput ? registerPasswordInput.value : "";
+        const confirmPassword = confirmPasswordInput
+            ? confirmPasswordInput.value
+            : "";
+
+        if (!username || password.length < 8) {
+            if (registerErrorEl) {
+                registerErrorEl.textContent =
+                    "Username kiriting va parol kamida 8 belgi bo'lsin.";
+            }
+            return;
+        }
+        if (confirmPasswordInput && password !== confirmPassword) {
+            if (registerErrorEl) {
+                registerErrorEl.textContent = "Parollar bir xil emas.";
+            }
+            return;
+        }
+        if (!sendJson({ type: "REGISTER", username, password })) {
+            if (registerErrorEl) {
+                registerErrorEl.textContent =
+                    "Server bilan aloqa yo'q. Qayta ulanilmoqda...";
+            }
+            connectSocket();
+        }
+    });
+}
 
 // Profile Menu & Logout
-profileMenuBtn?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    profileMenuEl?.classList.toggle("hidden");
-});
+if (profileMenuButton) {
+    profileMenuButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (profileMenuEl) {
+            profileMenuEl.classList.toggle("hidden");
+        }
+    });
+}
 
 document.addEventListener("click", () => {
-    profileMenuEl?.classList.add("hidden");
+    if (profileMenuEl) {
+        profileMenuEl.classList.add("hidden");
+    }
 });
 
-logoutButton?.addEventListener("click", () => {
-    const token = localStorage.getItem(SESSION_STORAGE_KEY);
-    sendJson({ type: "LOGOUT", token });
-    localStorage.removeItem(SESSION_STORAGE_KEY);
-    currentUser = null;
-    joined = false;
-    showAuthScreen();
-});
+if (logoutButton) {
+    logoutButton.addEventListener("click", () => {
+        const token = localStorage.getItem(SESSION_STORAGE_KEY);
+        sendJson({ type: "LOGOUT", token });
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        currentUser = null;
+        joined = false;
+        showAuthScreen();
+    });
+}
 
 // Chat Events
-leaveRoomBtn?.addEventListener("click", () => {
-    switchChat("general");
-});
+if (leaveButton) {
+    leaveButton.addEventListener("click", () => {
+        switchChat("general");
+    });
+}
 
-searchInput?.addEventListener("input", () => {
-    renderOnlineUsers(onlineUsers);
-});
+if (userSearchInput) {
+    userSearchInput.addEventListener("input", () => {
+        renderOnlineUsers(onlineUsers);
+    });
+}
 
-sendButton?.addEventListener("click", () => sendCurrentMessage());
+if (sendButton) {
+    sendButton.addEventListener("click", () => sendCurrentMessage());
+}
 
-messageInput?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        sendCurrentMessage();
-    }
-});
-
-attachButton?.addEventListener("click", () => {
-    if (messageInput && !messageInput.disabled && fileUploadInput) {
-        fileUploadInput.click();
-    }
-});
-
-fileUploadInput?.addEventListener("change", () => {
-    const file = fileUploadInput.files?.[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-        alert("Faqat rasm fayllarini yuborish mumkin.");
-        fileUploadInput.value = "";
-        return;
-    }
-    if (file.size > 900 * 1024) {
-        alert("Rasm hajmi 900 KB dan kichik bo'lishi kerak.");
-        fileUploadInput.value = "";
-        return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-        if (typeof reader.result === "string") {
-            sendCurrentMessage(reader.result);
+if (messageInput) {
+    messageInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendCurrentMessage();
         }
-        fileUploadInput.value = "";
-    };
-    reader.readAsDataURL(file);
-});
+    });
+}
+
+if (attachButton) {
+    attachButton.addEventListener("click", () => {
+        if (messageInput && !messageInput.disabled && fileUploadInput) {
+            fileUploadInput.click();
+        }
+    });
+}
+
+if (fileUploadInput) {
+    fileUploadInput.addEventListener("change", () => {
+        const file = fileUploadInput.files && fileUploadInput.files[0];
+        if (!file) {
+            return;
+        }
+        if (!file.type.startsWith("image/")) {
+            alert("Faqat rasm fayllarini yuborish mumkin.");
+            fileUploadInput.value = "";
+            return;
+        }
+        if (file.size > 900 * 1024) {
+            alert("Rasm hajmi 900 KB dan kichik bo'lishi kerak.");
+            fileUploadInput.value = "";
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = () => {
+            if (typeof reader.result === "string") {
+                sendCurrentMessage(reader.result);
+            }
+            fileUploadInput.value = "";
+        };
+        reader.readAsDataURL(file);
+    });
+}
 
 // Start
 connectSocket();
