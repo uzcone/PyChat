@@ -5,14 +5,17 @@ import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
 from typing import Any
 
 import asyncpg
 import websockets
+from websockets.http11 import Response
+
+from database import create_pool, create_tables
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
-DATABASE_URL = os.getenv("DATABASE_URL", "")
 SESSION_TTL_DAYS = 30
 MAX_MESSAGE_CHARS = 2000
 MAX_IMAGE_CHARS = 1_500_000
@@ -55,54 +58,11 @@ def verify_password(password: str, salt_hex: str, expected_hash: str) -> bool:
 
 async def init_db() -> None:
     global db_pool
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL environment variable is not set.")
-
-    db_pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=10)
+    db_pool = await create_pool()
+    await create_tables(db_pool)
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                username TEXT UNIQUE NOT NULL,
-                password_salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            """
-        )
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sessions (
-                token TEXT PRIMARY KEY,
-                username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                expires_at TIMESTAMPTZ NOT NULL
-            )
-            """
-        )
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS messages (
-                id SERIAL PRIMARY KEY,
-                sender_username TEXT NOT NULL,
-                recipient_username TEXT,
-                content TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            """
-        )
-        await conn.execute(
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS recipient_username TEXT"
-        )
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_username)"
-        )
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC)"
-        )
         user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
-        print(f"DB READY | existing_users={user_count}")
+    print(f"DB READY | existing_users={user_count}")
 
 
 async def send_json(ws: Any, payload: dict[str, Any]) -> None:
@@ -449,8 +409,19 @@ async def process_request(connection: Any, request: Any) -> Any:
         headers = getattr(request, "headers", None)
         upgrade = (headers.get("Upgrade") or "").lower() if headers else ""
         if upgrade != "websocket":
-            if hasattr(connection, "respond"):
-                return connection.respond(200, "OK\n")
+            body = b"OK\n"
+            return Response(
+                HTTPStatus.OK.value,
+                HTTPStatus.OK.phrase,
+                websockets.Headers(
+                    [
+                        ("Content-Type", "text/plain; charset=utf-8"),
+                        ("Content-Length", str(len(body))),
+                        ("Connection", "close"),
+                    ]
+                ),
+                body,
+            )
     except Exception:
         pass
     return None
