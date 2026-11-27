@@ -677,4 +677,5 @@ if (fileUploadInput) {
     });
 }
 
+
 connectSocket();
