@@ -80,5 +80,6 @@ async def create_tables(pool: asyncpg.Pool) -> None:
             ON sessions (expires_at);
             """
         )
+        
 
     print("PostgreSQL tables are ready.")
