@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -28,7 +29,7 @@ db_pool = None
 
 
 # =========================================
-# TIME & PACKET HELPERS
+# HELPERS
 # =========================================
 
 def utc_now():
@@ -48,8 +49,15 @@ async def send_packet(ws, packet_type, **kwargs):
         return False
 
 
+def safe_compare(first, second):
+    return hmac.compare_digest(
+        str(first).strip().lower(),
+        str(second).strip().lower(),
+    )
+
+
 # =========================================
-# PASSWORD & TOKEN HELPERS
+# PASSWORD HASHING & LEGACY VERIFICATION
 # =========================================
 
 def create_password_hash(password, salt=None):
@@ -70,18 +78,94 @@ def verify_password(password, salt, stored_hash):
     if not stored_hash:
         return False
 
+    password_bytes = password.encode("utf-8")
     stored_hash = str(stored_hash).strip()
+    salt = str(salt).strip() if salt else ""
 
-    # 1. PBKDF2 with salt
+    # 1. Current PyChat PBKDF2
     if salt:
-        _, calculated = create_password_hash(password, str(salt).strip())
-        if hmac.compare_digest(calculated.lower(), stored_hash.lower()):
-            return True
+        try:
+            _, calculated = create_password_hash(password, salt)
+            if safe_compare(calculated, stored_hash):
+                return True
+        except Exception:
+            pass
 
-    # 2. Plain SHA-256 fallback (if legacy hash without salt)
-    sha256_hex = hashlib.sha256(password.encode("utf-8")).hexdigest()
-    if hmac.compare_digest(sha256_hex.lower(), stored_hash.lower()):
-        return True
+    # 2. Django PBKDF2
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        try:
+            parts = stored_hash.split("$")
+            if len(parts) == 4:
+                iterations = int(parts[1])
+                encoded_salt = parts[2]
+                expected = base64.b64decode(parts[3], validate=True)
+
+                calculated = hashlib.pbkdf2_hmac(
+                    "sha256",
+                    password_bytes,
+                    encoded_salt.encode("utf-8"),
+                    iterations,
+                )
+                if hmac.compare_digest(calculated, expected):
+                    return True
+        except Exception:
+            pass
+
+    # 3. Legacy PBKDF2 variants (all iterations)
+    if salt:
+        for algorithm in ("sha256", "sha1", "sha512"):
+            for iterations in (
+                10000, 50000, 100000, 120000,
+                150000, 200000, 260000,
+                310000, 390000, 600000,
+            ):
+                try:
+                    calculated = hashlib.pbkdf2_hmac(
+                        algorithm,
+                        password_bytes,
+                        salt.encode("utf-8"),
+                        iterations,
+                    ).hex()
+                    if safe_compare(calculated, stored_hash):
+                        return True
+                except Exception:
+                    pass
+
+    # 4. Unsalted MD5 / SHA1 / SHA256 / SHA512
+    algorithms = {32: "md5", 40: "sha1", 64: "sha256", 128: "sha512"}
+    if re.fullmatch(r"[0-9a-fA-F]+", stored_hash):
+        algorithm = algorithms.get(len(stored_hash))
+        if algorithm:
+            try:
+                calculated = hashlib.new(algorithm, password_bytes).hexdigest()
+                if safe_compare(calculated, stored_hash):
+                    return True
+            except Exception:
+                pass
+
+    # 5. Salted algorithm$salt$hash
+    parts = stored_hash.split("$")
+    if len(parts) == 3:
+        algorithm, encoded_salt, expected = parts
+        if algorithm.lower() in ("md5", "sha1", "sha256", "sha512"):
+            for candidate in (encoded_salt + password, password + encoded_salt):
+                try:
+                    calculated = hashlib.new(
+                        algorithm.lower(),
+                        candidate.encode("utf-8"),
+                    ).hexdigest()
+                    if safe_compare(calculated, expected):
+                        return True
+                except Exception:
+                    pass
+
+    # 6. bcrypt
+    if stored_hash.startswith(("$2a$", "$2b$", "$2y$")):
+        try:
+            import bcrypt
+            return bcrypt.checkpw(password_bytes, stored_hash.encode("utf-8"))
+        except Exception:
+            pass
 
     return False
 
@@ -125,12 +209,12 @@ async def init_db():
 
         await conn.execute("""
             ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS password_salt TEXT NOT NULL DEFAULT ''
+            ADD COLUMN IF NOT EXISTS password_salt TEXT DEFAULT ''
         """)
 
         await conn.execute("""
             ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS avatar TEXT NOT NULL DEFAULT ''
+            ADD COLUMN IF NOT EXISTS avatar TEXT DEFAULT ''
         """)
 
         await conn.execute("""
@@ -153,8 +237,7 @@ async def init_db():
         """)
 
         total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages")
-        print(f"DB READY | users={total_users}, messages={total_messages}")
+        print(f"DB READY | existing_users={total_users}")
 
 
 async def get_user_by_username(username):
@@ -464,15 +547,16 @@ async def authenticate(ws):
                 return None
 
             if not verify_password(password, user["password_salt"], user["password_hash"]):
-                print(f"LOGIN DENIED (wrong password): {user['username']!r}")
+                print(
+                    f"LOGIN DENIED (wrong password): {user['username']!r} | "
+                    f"hash_prefix={str(user['password_hash'])[:15]!r} | "
+                    f"has_salt={bool(user['password_salt'])}"
+                )
                 await send_packet(ws, "ERROR", message="Invalid username or password.")
                 return None
 
-            # Upgrade legacy or unsalted hashes automatically
             expected_salt, expected_hash = create_password_hash(password, user["password_salt"])
-            if not user["password_salt"] or not hmac.compare_digest(
-                expected_hash.lower(), str(user["password_hash"]).lower()
-            ):
+            if not user["password_salt"] or not safe_compare(expected_hash, user["password_hash"]):
                 await upgrade_user_password(user["id"], password)
 
             token, _, expires_at = await create_session_record(user["id"])
@@ -532,7 +616,6 @@ async def authenticate(ws):
 
 async def client_handler(ws):
     active_username = None
-    print("WS CONNECTED")
 
     try:
         active_username = await authenticate(ws)
@@ -598,8 +681,8 @@ async def client_handler(ws):
             else:
                 await send_packet(ws, "ERROR", message="Unknown packet type.")
 
-    except websockets.exceptions.ConnectionClosed as exc:
-        print(f"WS CLOSED ({active_username}): {exc.code}")
+    except websockets.exceptions.ConnectionClosed:
+        pass
     except Exception as exc:
         print(f"CLIENT ERROR ({active_username}):", repr(exc))
     finally:
