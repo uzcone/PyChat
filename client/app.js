@@ -1,188 +1,129 @@
-
-"use strict";
-
-// ============================================
-// PYCHAT CLIENT — MATCHES PYCHAT SERVER PROTOCOL
-// LOGIN / REGISTER / RESUME / WELCOME / USERS
-// ============================================
-
 const WS_URL = "wss://pychat-8gdk.onrender.com";
 const SESSION_STORAGE_KEY = "pychat_session_token";
 
-const $ = (id) => document.getElementById(id);
+const statusDot = document.getElementById("statusDot");
+const connectionStatusEl = document.getElementById("connectionStatus");
+const loginScreen = document.getElementById("loginScreen");
+const chatScreen = document.getElementById("chatScreen");
 
-const statusDot = $("statusDot");
-const connectionStatusEl = $("connectionStatus");
+const loginForm = document.getElementById("loginForm");
+const loginUsernameInput = document.getElementById("loginUsername");
+const loginPasswordInput = document.getElementById("loginPassword");
+const toggleLoginPasswordBtn = document.getElementById("toggleLoginPassword");
+const loginButton = document.getElementById("loginButton");
+const loginErrorEl = document.getElementById("loginError");
+const showRegisterBtn = document.getElementById("showRegister");
 
-const loginScreen = $("loginScreen");
-const chatScreen = $("chatScreen");
+const registerForm = document.getElementById("registerForm");
+const registerUsernameInput = document.getElementById("registerUsername");
+const registerPasswordInput = document.getElementById("registerPassword");
+const confirmPasswordInput = document.getElementById("confirmPassword");
+const toggleRegisterPasswordBtn = document.getElementById("toggleRegisterPassword");
+const registerButton = document.getElementById("registerButton");
+const registerErrorEl = document.getElementById("registerError");
+const showLoginBtn = document.getElementById("showLogin");
 
-const loginForm = $("loginForm");
-const loginUsernameInput = $("loginUsername");
-const loginPasswordInput = $("loginPassword");
-const toggleLoginPasswordBtn = $("toggleLoginPassword");
-const loginButton = $("loginButton");
-const loginErrorEl = $("loginError");
-const showRegisterBtn = $("showRegister");
+const myAvatarEl = document.getElementById("myAvatar");
+const myAvatarImageEl = document.getElementById("myAvatarImage");
+const myUsernameEl = document.getElementById("myUsername");
+const profileMenuButton = document.getElementById("profileMenuButton");
+const profileMenuEl = document.getElementById("profileMenu");
+const logoutButton = document.getElementById("logoutButton");
 
-const registerForm = $("registerForm");
-const registerUsernameInput = $("registerUsername");
-const registerPasswordInput = $("registerPassword");
-const confirmPasswordInput = $("confirmPassword");
-const toggleRegisterPasswordBtn = $("toggleRegisterPassword");
-const registerButton = $("registerButton");
-const registerErrorEl = $("registerError");
-const showLoginBtn = $("showLogin");
+const userSearchInput = document.getElementById("userSearch");
+const conversationListEl = document.getElementById("conversationList");
+const userListEl = document.getElementById("userList");
+const userCountEl = document.getElementById("userCount");
 
-const myAvatarEl = $("myAvatar");
-const myAvatarImageEl = $("myAvatarImage");
-const myUsernameEl = $("myUsername");
-const profileMenuButton = $("profileMenuButton");
-const profileMenuEl = $("profileMenu");
-const logoutButton = $("logoutButton");
+const topOnlineUsersEl = document.getElementById("topOnlineUsers");
+const topOnlineCountEl = document.getElementById("topOnlineCount");
+const onlineNowUsersEl = document.getElementById("onlineNowUsers");
+const onlineNowCountEl = document.getElementById("onlineNowCount");
 
-const userSearchInput = $("userSearch");
-const conversationListEl = $("conversationList");
-const userListEl = $("userList");
-const userCountEl = $("userCount");
+const chatAvatarEl = document.getElementById("chatAvatar");
+const chatTitleEl = document.getElementById("chatTitle");
+const chatSubtitleEl = document.getElementById("chatSubtitle");
+const leaveButton = document.getElementById("leaveButton");
 
-const topOnlineUsersEl = $("topOnlineUsers");
-const topOnlineCountEl = $("topOnlineCount");
-const onlineNowUsersEl = $("onlineNowUsers");
-const onlineNowCountEl = $("onlineNowCount");
-
-const chatAvatarEl = $("chatAvatar");
-const chatTitleEl = $("chatTitle");
-const chatSubtitleEl = $("chatSubtitle");
-const leaveButton = $("leaveButton");
-
-const messagesContainer = $("messages");
-const messageInput = $("messageInput");
-const sendButton = $("sendButton");
-const attachButton = $("attachButton");
-const fileUploadInput = $("fileUpload");
+const messagesContainer = document.getElementById("messages");
+const emptyStateEl = document.querySelector("#messages .empty-state");
+const messageInput = document.getElementById("messageInput");
+const sendButton = document.getElementById("sendButton");
+const attachButton = document.getElementById("attachButton");
+const fileUploadInput = document.getElementById("fileUpload");
 
 let socket = null;
 let reconnectTimer = null;
 let pingTimer = null;
-
 let currentUser = null;
 let joined = false;
-let manuallyLoggedOut = false;
-let authMode = null;
-let pendingAuth = null;
-
 let onlineUsers = [];
 let activeChat = "general";
 let conversations = { general: [] };
 
 function normalizeUser(name) {
-    return String(name || "").trim().toLowerCase();
+    return (name || "").trim().toLowerCase();
 }
 
-function formatTime(value) {
-    if (!value) return "";
-
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "";
-
-    return date.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit"
-    });
+function formatTime(isoString) {
+    if (!isoString) { return ""; }
+    const date = new Date(isoString);
+    if (Number.isNaN(date.getTime())) { return ""; }
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function setConnectionStatus(state, label) {
-    if (connectionStatusEl) {
-        connectionStatusEl.textContent = label;
-    }
-
+    if (connectionStatusEl) { connectionStatusEl.textContent = label; }
     if (statusDot) {
-        statusDot.classList.toggle("online", state === "online");
+        statusDot.classList.remove("online");
+        if (state === "online") { statusDot.classList.add("online"); }
     }
-}
-
-function resetAuthButtons() {
-    if (loginButton) loginButton.disabled = false;
-    if (registerButton) registerButton.disabled = false;
 }
 
 function updateSendAvailability() {
-    const canSend =
-        socket &&
-        socket.readyState === WebSocket.OPEN &&
-        currentUser &&
-        joined;
+    const canSend = Boolean(socket && socket.readyState === WebSocket.OPEN && currentUser && joined);
+    if (messageInput) { messageInput.disabled = !canSend; }
+    if (sendButton) { sendButton.disabled = !canSend; }
+    if (attachButton) { attachButton.disabled = !canSend; }
+}
 
-    if (messageInput) messageInput.disabled = !canSend;
-    if (sendButton) sendButton.disabled = !canSend;
-    if (attachButton) attachButton.disabled = !canSend;
+function resetAuthButtons() {
+    if (loginButton) { loginButton.disabled = false; }
+    if (registerButton) { registerButton.disabled = false; }
 }
 
 function showAuthScreen() {
-    if (loginScreen) loginScreen.classList.remove("hidden");
-    if (chatScreen) chatScreen.classList.add("hidden");
-
+    if (loginScreen) { loginScreen.classList.remove("hidden"); }
+    if (chatScreen) { chatScreen.classList.add("hidden"); }
     joined = false;
-    updateSendAvailability();
     resetAuthButtons();
+    updateSendAvailability();
 }
 
 function showChatScreen(username) {
-    if (!username) return;
-
     currentUser = username;
-
-    if (loginScreen) loginScreen.classList.add("hidden");
-    if (chatScreen) chatScreen.classList.remove("hidden");
-
-    if (myAvatarEl) {
-        myAvatarEl.textContent = username[0].toUpperCase();
-    }
-
-    if (myUsernameEl) {
-        myUsernameEl.textContent = username;
-    }
-
-    if (myAvatarImageEl) {
-        myAvatarImageEl.classList.add("hidden");
-    }
-
-    if (loginErrorEl) loginErrorEl.textContent = "";
-    if (registerErrorEl) registerErrorEl.textContent = "";
-
+    if (loginScreen) { loginScreen.classList.add("hidden"); }
+    if (chatScreen) { chatScreen.classList.remove("hidden"); }
     resetAuthButtons();
+
+    const initial = (username[0] || "U").toUpperCase();
+    if (myAvatarEl) { myAvatarEl.textContent = initial; }
+    if (myUsernameEl) { myUsernameEl.textContent = username; }
+    if (myAvatarImageEl) { myAvatarImageEl.classList.add("hidden"); }
+
     switchChat("general");
-    updateSendAvailability();
 }
 
 function ensureConversation(key) {
-    if (!conversations[key]) {
-        conversations[key] = [];
-    }
-
+    if (!conversations[key]) { conversations[key] = []; }
     return conversations[key];
 }
 
-function normalizeMessage(message) {
-    return {
-        ...message,
-        sender: message.sender || message.username || "",
-        to: message.to ?? message.recipient ?? null,
-        text: message.text ?? message.content ?? "",
-        time: message.time || message.created_at || message.timestamp || null
-    };
-}
-
-function getConversationKeyForMessage(rawMessage) {
-    const msg = normalizeMessage(rawMessage);
-
+function getConversationKeyForMessage(msg) {
     const sender = normalizeUser(msg.sender);
     const recipient = normalizeUser(msg.to);
     const me = normalizeUser(currentUser);
-
-    if (!recipient) return "general";
-
+    if (!recipient) { return "general"; }
     return sender === me ? recipient : sender;
 }
 
@@ -191,36 +132,18 @@ function switchChat(targetKey) {
     ensureConversation(activeChat);
 
     if (activeChat === "general") {
-        if (chatAvatarEl) chatAvatarEl.textContent = "P";
-        if (chatTitleEl) chatTitleEl.textContent = "General Chat";
-        if (chatSubtitleEl) {
-            chatSubtitleEl.textContent =
-                "Welcome to the PyChat community";
-        }
-        if (leaveButton) leaveButton.classList.add("hidden");
+        if (chatAvatarEl) { chatAvatarEl.textContent = "P"; }
+        if (chatTitleEl) { chatTitleEl.textContent = "General Chat"; }
+        if (chatSubtitleEl) { chatSubtitleEl.textContent = "Welcome to the PyChat community"; }
+        if (leaveButton) { leaveButton.classList.add("hidden"); }
     } else {
-        if (chatAvatarEl) {
-            chatAvatarEl.textContent =
-                activeChat[0].toUpperCase();
-        }
-
-        if (chatTitleEl) {
-            chatTitleEl.textContent = activeChat;
-        }
-
-        const isOnline = onlineUsers.some(
-            (user) => normalizeUser(user) === activeChat
-        );
-
+        if (chatAvatarEl) { chatAvatarEl.textContent = (activeChat[0] || "U").toUpperCase(); }
+        if (chatTitleEl) { chatTitleEl.textContent = activeChat; }
+        const isOnline = onlineUsers.some((u) => normalizeUser(u) === activeChat);
         if (chatSubtitleEl) {
-            chatSubtitleEl.textContent = isOnline
-                ? "Private chat • Online"
-                : "Private chat • Offline";
+            chatSubtitleEl.textContent = isOnline ? "Private chat • Online" : "Private chat • Offline";
         }
-
-        if (leaveButton) {
-            leaveButton.classList.remove("hidden");
-        }
+        if (leaveButton) { leaveButton.classList.remove("hidden"); }
     }
 
     renderConversationsSidebar();
@@ -228,31 +151,16 @@ function switchChat(targetKey) {
 }
 
 function renderConversationsSidebar() {
-    if (!conversationListEl) return;
-
-    const query = (userSearchInput?.value || "")
-        .trim()
-        .toLowerCase();
-
+    if (!conversationListEl) { return; }
+    const query = (userSearchInput ? userSearchInput.value : "").trim().toLowerCase();
     conversationListEl.innerHTML = "";
 
-    const previousChats = Object.keys(conversations)
-        .filter((key) => key !== "general");
-
-    const onlineOthers = onlineUsers
-        .map(normalizeUser)
-        .filter((user) =>
-            user && user !== normalizeUser(currentUser)
-        );
-
-    const peers = Array.from(
-        new Set([...previousChats, ...onlineOthers])
-    ).filter((peer) => !query || peer.includes(query));
+    const keys = Object.keys(conversations).filter((k) => k !== "general");
+    const onlineOthers = onlineUsers.map((u) => normalizeUser(u)).filter((u) => u && u !== normalizeUser(currentUser));
+    const allPeers = Array.from(new Set([...keys, ...onlineOthers])).filter((peer) => !query || peer.includes(query));
 
     const generalLi = document.createElement("li");
-    generalLi.className =
-        "online-user-item" +
-        (activeChat === "general" ? " active" : "");
+    generalLi.className = "online-user-item" + (activeChat === "general" ? " active" : "");
     generalLi.style.cursor = "pointer";
 
     const generalAvatar = document.createElement("span");
@@ -263,84 +171,76 @@ function renderConversationsSidebar() {
     generalLabel.className = "online-user-label";
     generalLabel.textContent = "General Chat";
 
-    generalLi.append(generalAvatar, generalLabel);
-    generalLi.addEventListener("click", () => {
-        switchChat("general");
-    });
-
+    generalLi.appendChild(generalAvatar);
+    generalLi.appendChild(generalLabel);
+    generalLi.addEventListener("click", () => switchChat("general"));
     conversationListEl.appendChild(generalLi);
 
-    peers.forEach((peer) => {
+    allPeers.forEach((peer) => {
         const li = document.createElement("li");
-        li.className =
-            "online-user-item" +
-            (activeChat === peer ? " active" : "");
+        li.className = "online-user-item" + (activeChat === peer ? " active" : "");
         li.style.cursor = "pointer";
 
         const avatar = document.createElement("span");
         avatar.className = "user-avatar";
-        avatar.textContent = peer[0].toUpperCase();
+        avatar.textContent = (peer[0] || "U").toUpperCase();
 
         const label = document.createElement("span");
         label.className = "online-user-label";
         label.textContent = peer;
 
-        li.append(avatar, label);
+        li.appendChild(avatar);
+        li.appendChild(label);
         li.addEventListener("click", () => switchChat(peer));
-
         conversationListEl.appendChild(li);
     });
 }
 
 function appendMention(username) {
-    if (!messageInput || messageInput.disabled) return;
-
-    const prefix =
-        messageInput.value && !messageInput.value.endsWith(" ")
-            ? " "
-            : "";
-
-    messageInput.value += prefix + "@" + username + " ";
+    if (!messageInput || messageInput.disabled) { return; }
+    const prefix = messageInput.value && !messageInput.value.endsWith(" ") ? " " : "";
+    messageInput.value = messageInput.value + prefix + "@" + username + " ";
     messageInput.focus();
 }
 
-function createOnlineChip(username, compact = false) {
+function createOnlineChip(username, compact) {
     const cleanName = normalizeUser(username);
-
     const chip = document.createElement("div");
     chip.className = "online-user-chip";
     chip.style.cursor = "pointer";
-    chip.title = "Shaxsiy chat ochish";
+    chip.title = cleanName + " bilan shaxsiy chat ochish";
 
     const avatar = document.createElement("span");
-    avatar.className = compact
-        ? "online-user-avatar"
-        : "user-avatar";
-    avatar.textContent = cleanName[0]?.toUpperCase() || "U";
+    avatar.className = compact ? "online-user-avatar" : "user-avatar";
+    avatar.textContent = (cleanName[0] || "U").toUpperCase();
 
-    const name = document.createElement("span");
-    name.className = "online-user-name";
-    name.textContent = cleanName;
+    const nameEl = document.createElement("span");
+    nameEl.className = "online-user-name";
+    nameEl.textContent = cleanName;
 
-    const mention = document.createElement("button");
-    mention.type = "button";
-    mention.textContent = "@";
-    mention.style.border = "none";
-    mention.style.background = "transparent";
-    mention.style.cursor = "pointer";
-
-    mention.addEventListener("click", (event) => {
-        event.stopPropagation();
+    const mentionBtn = document.createElement("button");
+    mentionBtn.type = "button";
+    mentionBtn.textContent = "@";
+    mentionBtn.style.border = "none";
+    mentionBtn.style.background = "transparent";
+    mentionBtn.style.fontWeight = "700";
+    mentionBtn.style.cursor = "pointer";
+    mentionBtn.style.padding = "0 2px";
+    mentionBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
         appendMention(cleanName);
     });
 
     const dot = document.createElement("span");
     dot.className = "online-indicator";
 
-    chip.append(avatar, name, mention, dot);
+    chip.appendChild(avatar);
+    chip.appendChild(nameEl);
+    chip.appendChild(mentionBtn);
+    chip.appendChild(dot);
 
     chip.addEventListener("click", () => {
-        if (cleanName !== normalizeUser(currentUser)) {
+        if (cleanName && cleanName !== normalizeUser(currentUser)) {
             switchChat(cleanName);
         }
     });
@@ -350,138 +250,110 @@ function createOnlineChip(username, compact = false) {
 
 function renderOnlineUsers(users) {
     onlineUsers = Array.isArray(users) ? users : [];
+    const query = (userSearchInput ? userSearchInput.value : "").trim().toLowerCase();
+    const filtered = onlineUsers.filter((u) => !query || u.toLowerCase().includes(query));
+    const countLabel = onlineUsers.length + " online";
 
-    const query = (userSearchInput?.value || "")
-        .trim()
-        .toLowerCase();
-
-    const filtered = onlineUsers.filter((user) =>
-        normalizeUser(user).includes(query)
-    );
-
-    if (userCountEl) {
-        userCountEl.textContent = String(onlineUsers.length);
-    }
-
-    if (topOnlineCountEl) {
-        topOnlineCountEl.textContent = String(onlineUsers.length);
-    }
-
-    if (onlineNowCountEl) {
-        onlineNowCountEl.textContent =
-            onlineUsers.length + " online";
-    }
+    if (userCountEl) { userCountEl.textContent = String(onlineUsers.length); }
+    if (topOnlineCountEl) { topOnlineCountEl.textContent = String(onlineUsers.length); }
+    if (onlineNowCountEl) { onlineNowCountEl.textContent = countLabel; }
 
     if (topOnlineUsersEl) {
         topOnlineUsersEl.innerHTML = "";
-
         if (!filtered.length) {
-            const empty = document.createElement("span");
-            empty.className = "top-online-empty";
-            empty.textContent = "No one online right now";
-            topOnlineUsersEl.appendChild(empty);
+            const emptySpan = document.createElement("span");
+            emptySpan.className = "top-online-empty";
+            emptySpan.textContent = "No one online right now";
+            topOnlineUsersEl.appendChild(emptySpan);
         } else {
-            filtered.forEach((user) => {
-                topOnlineUsersEl.appendChild(
-                    createOnlineChip(user)
-                );
-            });
+            filtered.forEach((u) => topOnlineUsersEl.appendChild(createOnlineChip(u, false)));
         }
     }
 
     if (onlineNowUsersEl) {
         onlineNowUsersEl.innerHTML = "";
-
         if (!filtered.length) {
-            const empty = document.createElement("span");
-            empty.className = "top-online-empty";
-            empty.textContent =
-                "Hozircha online foydalanuvchilar yo'q";
-            onlineNowUsersEl.appendChild(empty);
+            const emptySpan = document.createElement("span");
+            emptySpan.className = "top-online-empty";
+            emptySpan.textContent = "Hozircha online foydalanuvchilar yo'q";
+            onlineNowUsersEl.appendChild(emptySpan);
         } else {
-            filtered.forEach((user) => {
-                onlineNowUsersEl.appendChild(
-                    createOnlineChip(user, true)
-                );
-            });
+            filtered.forEach((u) => onlineNowUsersEl.appendChild(createOnlineChip(u, true)));
         }
     }
 
     if (userListEl) {
         userListEl.innerHTML = "";
-
-        filtered.forEach((user) => {
-            const name = normalizeUser(user);
-
+        filtered.forEach((u) => {
             const li = document.createElement("li");
             li.className = "online-user-item";
             li.style.cursor = "pointer";
 
             const avatar = document.createElement("span");
             avatar.className = "user-avatar";
-            avatar.textContent = name[0]?.toUpperCase() || "U";
+            avatar.textContent = (u[0] || "U").toUpperCase();
 
             const label = document.createElement("span");
             label.className = "online-user-label";
-            label.textContent = name;
+            label.textContent = u;
 
             const dot = document.createElement("span");
             dot.className = "online-indicator";
 
-            li.append(avatar, label, dot);
+            li.appendChild(avatar);
+            li.appendChild(label);
+            li.appendChild(dot);
 
             li.addEventListener("click", () => {
-                if (name !== normalizeUser(currentUser)) {
-                    switchChat(name);
+                if (normalizeUser(u) !== normalizeUser(currentUser)) {
+                    switchChat(normalizeUser(u));
                 }
             });
-
             userListEl.appendChild(li);
         });
     }
 
     if (activeChat !== "general" && chatSubtitleEl) {
-        const isOnline = onlineUsers.some(
-            (user) => normalizeUser(user) === activeChat
-        );
-
-        chatSubtitleEl.textContent = isOnline
-            ? "Private chat • Online"
-            : "Private chat • Offline";
+        const isOnline = onlineUsers.some((u) => normalizeUser(u) === activeChat);
+        chatSubtitleEl.textContent = isOnline ? "Private chat • Online" : "Private chat • Offline";
     }
 
     renderConversationsSidebar();
 }
 
-function appendMessageElement(rawMessage) {
-    if (!messagesContainer) return;
+function appendMessageElement(msg) {
+    if (!messagesContainer) { return; }
+    if (emptyStateEl) { emptyStateEl.classList.add("hidden"); }
 
-    const msg = normalizeMessage(rawMessage);
-    const emptyState = messagesContainer.querySelector(".empty-state");
-
-    if (emptyState) emptyState.classList.add("hidden");
-
-    const isMine =
-        normalizeUser(msg.sender) === normalizeUser(currentUser);
-
+    const isMine = normalizeUser(msg.sender) === normalizeUser(currentUser);
     const wrapper = document.createElement("div");
     wrapper.className = "message" + (isMine ? " mine" : "");
 
     const meta = document.createElement("div");
     meta.className = "message-meta";
+    const timeStr = formatTime(msg.time);
+    meta.textContent = timeStr ? msg.sender + " • " + timeStr : msg.sender;
 
-    const time = formatTime(msg.time);
-    meta.textContent = time
-        ? msg.sender + " • " + time
-        : msg.sender;
+    if (isMine && msg.id) {
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.textContent = "×";
+        delBtn.style.marginLeft = "8px";
+        delBtn.style.border = "none";
+        delBtn.style.background = "transparent";
+        delBtn.style.color = "inherit";
+        delBtn.style.cursor = "pointer";
+        delBtn.style.fontWeight = "700";
+        delBtn.addEventListener("click", () => {
+            sendJson({ type: "DELETE_MESSAGE", id: msg.id });
+        });
+        meta.appendChild(delBtn);
+    }
 
     const bubble = document.createElement("div");
     bubble.className = "message-bubble";
 
-    if (
-        typeof msg.text === "string" &&
-        msg.text.startsWith("data:image/")
-    ) {
+    if (typeof msg.text === "string" && msg.text.startsWith("data:image/")) {
         const img = document.createElement("img");
         img.src = msg.text;
         img.alt = "Sent image";
@@ -494,532 +366,315 @@ function appendMessageElement(rawMessage) {
         bubble.textContent = msg.text;
     }
 
-    wrapper.append(meta, bubble);
+    wrapper.appendChild(meta);
+    wrapper.appendChild(bubble);
     messagesContainer.appendChild(wrapper);
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
 function renderActiveMessages() {
-    if (!messagesContainer) return;
-
+    if (!messagesContainer) { return; }
     const list = ensureConversation(activeChat);
     messagesContainer.innerHTML = "";
 
     if (!list.length) {
-        const empty = document.createElement("div");
-        empty.className = "empty-state";
-        empty.textContent = "Hozircha xabarlar yo'q";
-        messagesContainer.appendChild(empty);
+        if (emptyStateEl) {
+            emptyStateEl.classList.remove("hidden");
+            messagesContainer.appendChild(emptyStateEl);
+        }
         return;
     }
 
-    list.forEach(appendMessageElement);
+    if (emptyStateEl) { emptyStateEl.classList.add("hidden"); }
+    list.forEach((msg) => appendMessageElement(msg));
 }
 
-function ingestMessage(rawMessage) {
-    const msg = normalizeMessage(rawMessage);
+function ingestMessage(msg) {
     const key = getConversationKeyForMessage(msg);
-
-    ensureConversation(key).push(msg);
-
-    if (key === activeChat) {
-        appendMessageElement(msg);
-    }
-
+    const list = ensureConversation(key);
+    list.push(msg);
+    if (key === activeChat) { appendMessageElement(msg); }
     renderConversationsSidebar();
 }
 
 function sendJson(payload) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-        return false;
-    }
-
-    try {
+    if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(payload));
         return true;
-    } catch {
-        return false;
     }
+    return false;
 }
 
-function sendCurrentMessage(customContent = null) {
-    if (!joined || !currentUser || !messageInput) return;
+function sendCurrentMessage(customContent) {
+    if (!joined || !currentUser || !messageInput) { return; }
+    const text = customContent !== undefined && customContent !== null ? customContent : messageInput.value.trim();
+    if (!text) { return; }
 
-    const content =
-        customContent !== null
-            ? customContent
-            : messageInput.value.trim();
-
-    if (!content) return;
-
-    const sent = sendJson({
+    const payload = {
         type: "MESSAGE",
-        text: content,
+        text: text,
         to: activeChat === "general" ? null : activeChat
-    });
+    };
 
-    if (sent && customContent === null) {
+    if (sendJson(payload) && (customContent === undefined || customContent === null)) {
         messageInput.value = "";
         messageInput.focus();
     }
 }
 
-// ============================================
-// AUTHENTICATION
-// ============================================
-
-function sendPendingAuthentication() {
-    if (!pendingAuth || !socket ||
-        socket.readyState !== WebSocket.OPEN) {
-        return;
-    }
-
-    const auth = pendingAuth;
-    pendingAuth = null;
-    authMode = auth.type;
-
-    if (auth.type === "RESUME") {
-        sendJson({
-            type: "RESUME",
-            token: auth.token
-        });
-    } else {
-        sendJson({
-            type: auth.type,
-            username: auth.username,
-            password: auth.password
-        });
-    }
-}
-
-function startAuthentication(type, username, password) {
-    manuallyLoggedOut = false;
-
-    pendingAuth = {
-        type,
-        username,
-        password
-    };
-
-    if (type === "LOGIN" && loginButton) {
-        loginButton.disabled = true;
-    }
-
-    if (type === "REGISTER" && registerButton) {
-        registerButton.disabled = true;
-    }
-
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        sendPendingAuthentication();
-    } else {
-        connectSocket();
-    }
-}
-
-function handleWelcome(data) {
-    const username =
-        data.username || data.user?.username || currentUser;
-
-    if (!username) {
-        showAuthScreen();
-        return;
-    }
-
-    joined = true;
-    currentUser = username;
-    authMode = null;
-
-    if (data.token) {
-        localStorage.setItem(
-            SESSION_STORAGE_KEY,
-            data.token
-        );
-    }
-
-    if (loginErrorEl) loginErrorEl.textContent = "";
-    if (registerErrorEl) registerErrorEl.textContent = "";
-
-    showChatScreen(username);
-    updateSendAvailability();
-}
-
-function handleServerError(data) {
-    const message = data.message || "Authentication failed.";
-
-    if (authMode === "LOGIN" && loginErrorEl) {
-        loginErrorEl.textContent = message;
-    } else if (authMode === "REGISTER" && registerErrorEl) {
-        registerErrorEl.textContent = message;
-    } else if (authMode === "RESUME") {
-        localStorage.removeItem(SESSION_STORAGE_KEY);
-        currentUser = null;
-        showAuthScreen();
-
-        if (loginErrorEl) {
-            loginErrorEl.textContent =
-                "Sessiya tugagan. Iltimos, qayta login qiling.";
-        }
-    } else {
-        alert(message);
-    }
-
-    authMode = null;
-    pendingAuth = null;
-    resetAuthButtons();
-}
-
-// ============================================
-// WEBSOCKET CONNECTION
-// ============================================
-
 function connectSocket() {
-    if (
-        socket &&
-        (socket.readyState === WebSocket.OPEN ||
-         socket.readyState === WebSocket.CONNECTING)
-    ) {
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
         return;
     }
-
-    clearTimeout(reconnectTimer);
 
     setConnectionStatus("connecting", "Connecting...");
+    socket = new WebSocket(WS_URL);
 
-    try {
-        socket = new WebSocket(WS_URL);
-    } catch {
-        setConnectionStatus("offline", "Disconnected");
-        scheduleReconnect();
-        return;
-    }
-
-    const thisSocket = socket;
-
-    thisSocket.addEventListener("open", () => {
-        if (socket !== thisSocket) return;
-
+    socket.addEventListener("open", () => {
         setConnectionStatus("online", "Connected");
-
-        clearInterval(pingTimer);
-
-        pingTimer = setInterval(() => {
-            if (socket === thisSocket && joined) {
-                sendJson({ type: "PING" });
-            }
-        }, 25000);
-
-        if (pendingAuth) {
-            sendPendingAuthentication();
-            return;
-        }
-
-        const savedToken =
-            localStorage.getItem(SESSION_STORAGE_KEY);
-
-        if (savedToken && !manuallyLoggedOut) {
-            pendingAuth = {
-                type: "RESUME",
-                token: savedToken
-            };
-
-            sendPendingAuthentication();
+        const savedToken = localStorage.getItem(SESSION_STORAGE_KEY);
+        if (savedToken) {
+            sendJson({ type: "RESUME_SESSION", token: savedToken });
         } else {
             showAuthScreen();
         }
+        updateSendAvailability();
+
+        clearInterval(pingTimer);
+        pingTimer = setInterval(() => { sendJson({ type: "PING" }); }, 25000);
     });
 
-    thisSocket.addEventListener("message", (event) => {
-        if (socket !== thisSocket) return;
-
+    socket.addEventListener("message", (event) => {
         let data;
-
-        try {
-            data = JSON.parse(event.data);
-        } catch {
-            return;
-        }
+        try { data = JSON.parse(event.data); } catch (err) { return; }
 
         switch (data.type) {
-            // Server sends WELCOME, not AUTH_OK.
-            case "WELCOME":
-                handleWelcome(data);
+            case "AUTH_OK":
+                if (data.token) { localStorage.setItem(SESSION_STORAGE_KEY, data.token); }
+                if (loginErrorEl) { loginErrorEl.textContent = ""; }
+                if (registerErrorEl) { registerErrorEl.textContent = ""; }
+                conversations = { general: [] };
+                showChatScreen(data.username);
                 break;
 
-            // Server sends USERS, not ONLINE_USERS.
-            case "USERS":
+            case "AUTH_ERROR":
+                if (loginErrorEl) { loginErrorEl.textContent = data.message || "Authentication failed."; }
+                if (registerErrorEl) { registerErrorEl.textContent = data.message || "Registration failed."; }
+                resetAuthButtons();
+                break;
+
+            case "SESSION_EXPIRED":
+                localStorage.removeItem(SESSION_STORAGE_KEY);
+                showAuthScreen();
+                break;
+
+            case "WELCOME":
+                joined = true;
+                updateSendAvailability();
+                break;
+
             case "ONLINE_USERS":
                 renderOnlineUsers(data.users || []);
                 break;
 
-            case "HISTORY": {
+            case "HISTORY":
                 conversations = { general: [] };
-
-                (data.messages || []).forEach((rawMessage) => {
-                    const msg = normalizeMessage(rawMessage);
-                    const key = getConversationKeyForMessage(msg);
-
-                    ensureConversation(key).push(msg);
+                (data.messages || []).forEach((m) => {
+                    const key = getConversationKeyForMessage(m);
+                    ensureConversation(key).push(m);
                 });
-
                 renderConversationsSidebar();
                 renderActiveMessages();
                 break;
-            }
 
             case "MESSAGE":
                 ingestMessage(data);
                 break;
 
+            case "MESSAGE_DELETED": {
+                const targetId = data.id;
+                Object.keys(conversations).forEach((key) => {
+                    conversations[key] = conversations[key].filter((m) => m.id !== targetId);
+                });
+                renderActiveMessages();
+                break;
+            }
+
             case "ERROR":
-                handleServerError(data);
-                break;
-
-            case "SESSION_EXPIRED":
-                localStorage.removeItem(SESSION_STORAGE_KEY);
-                currentUser = null;
-                joined = false;
-                showAuthScreen();
-                break;
-
-            case "PONG":
+                alert(data.message || "Error occurred.");
                 break;
 
             default:
                 break;
         }
-
-        updateSendAvailability();
     });
 
-    thisSocket.addEventListener("close", () => {
-        if (socket !== thisSocket) return;
-
+    socket.addEventListener("close", () => {
         clearInterval(pingTimer);
-
         joined = false;
         updateSendAvailability();
-
         setConnectionStatus("offline", "Reconnecting...");
-
-        if (authMode) {
-            resetAuthButtons();
-        }
-
-        if (!manuallyLoggedOut) {
-            scheduleReconnect();
-        }
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connectSocket, 2500);
     });
 
-    thisSocket.addEventListener("error", () => {
-        if (socket !== thisSocket) return;
-
+    socket.addEventListener("error", () => {
         setConnectionStatus("offline", "Disconnected");
     });
 }
 
-function scheduleReconnect() {
-    if (manuallyLoggedOut) return;
-
-    clearTimeout(reconnectTimer);
-
-    reconnectTimer = setTimeout(() => {
-        connectSocket();
-    }, 2500);
+if (showRegisterBtn) {
+    showRegisterBtn.addEventListener("click", () => {
+        if (loginForm) { loginForm.classList.add("hidden"); }
+        if (registerForm) { registerForm.classList.remove("hidden"); }
+        if (loginErrorEl) { loginErrorEl.textContent = ""; }
+        if (registerErrorEl) { registerErrorEl.textContent = ""; }
+    });
 }
 
-// ============================================
-// LOGIN / REGISTER EVENTS
-// ============================================
+if (showLoginBtn) {
+    showLoginBtn.addEventListener("click", () => {
+        if (registerForm) { registerForm.classList.add("hidden"); }
+        if (loginForm) { loginForm.classList.remove("hidden"); }
+        if (loginErrorEl) { loginErrorEl.textContent = ""; }
+        if (registerErrorEl) { registerErrorEl.textContent = ""; }
+    });
+}
 
-showRegisterBtn?.addEventListener("click", () => {
-    loginForm?.classList.add("hidden");
-    registerForm?.classList.remove("hidden");
+if (toggleLoginPasswordBtn) {
+    toggleLoginPasswordBtn.addEventListener("click", () => {
+        if (!loginPasswordInput) { return; }
+        const isPass = loginPasswordInput.type === "password";
+        loginPasswordInput.type = isPass ? "text" : "password";
+        toggleLoginPasswordBtn.textContent = isPass ? "Hide" : "Show";
+    });
+}
 
-    if (loginErrorEl) loginErrorEl.textContent = "";
-    if (registerErrorEl) registerErrorEl.textContent = "";
-});
+if (toggleRegisterPasswordBtn) {
+    toggleRegisterPasswordBtn.addEventListener("click", () => {
+        if (!registerPasswordInput) { return; }
+        const isPass = registerPasswordInput.type === "password";
+        registerPasswordInput.type = isPass ? "text" : "password";
+        toggleRegisterPasswordBtn.textContent = isPass ? "Hide" : "Show";
+    });
+}
 
-showLoginBtn?.addEventListener("click", () => {
-    registerForm?.classList.add("hidden");
-    loginForm?.classList.remove("hidden");
+if (loginForm) {
+    loginForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        if (loginErrorEl) { loginErrorEl.textContent = ""; }
+        const username = (loginUsernameInput ? loginUsernameInput.value : "").trim();
+        const password = loginPasswordInput ? loginPasswordInput.value : "";
 
-    if (loginErrorEl) loginErrorEl.textContent = "";
-    if (registerErrorEl) registerErrorEl.textContent = "";
-});
-
-toggleLoginPasswordBtn?.addEventListener("click", () => {
-    if (!loginPasswordInput) return;
-
-    const show = loginPasswordInput.type === "password";
-    loginPasswordInput.type = show ? "text" : "password";
-    toggleLoginPasswordBtn.textContent = show ? "Hide" : "Show";
-});
-
-toggleRegisterPasswordBtn?.addEventListener("click", () => {
-    if (!registerPasswordInput) return;
-
-    const show = registerPasswordInput.type === "password";
-    registerPasswordInput.type = show ? "text" : "password";
-    toggleRegisterPasswordBtn.textContent = show ? "Hide" : "Show";
-});
-
-loginForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-
-    if (loginErrorEl) loginErrorEl.textContent = "";
-
-    const username = (loginUsernameInput?.value || "").trim();
-    const password = loginPasswordInput?.value || "";
-
-    if (!username || !password) {
-        if (loginErrorEl) {
-            loginErrorEl.textContent =
-                "Username va parolni kiriting.";
+        if (!username || !password) {
+            if (loginErrorEl) { loginErrorEl.textContent = "Username va parolni kiriting."; }
+            return;
         }
-        return;
-    }
-
-    startAuthentication("LOGIN", username, password);
-});
-
-registerForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-
-    if (registerErrorEl) registerErrorEl.textContent = "";
-
-    const username = (registerUsernameInput?.value || "").trim();
-    const password = registerPasswordInput?.value || "";
-    const confirmation = confirmPasswordInput?.value || "";
-
-    if (!username || password.length < 8) {
-        if (registerErrorEl) {
-            registerErrorEl.textContent =
-                "Username kiriting va parol kamida 8 belgi bo'lsin.";
+        if (!sendJson({ type: "LOGIN", username: username, password: password })) {
+            if (loginErrorEl) { loginErrorEl.textContent = "Server bilan aloqa yo'q. Qayta ulanilmoqda..."; }
+            connectSocket();
         }
-        return;
-    }
+    });
+}
 
-    if (password !== confirmation) {
-        if (registerErrorEl) {
-            registerErrorEl.textContent =
-                "Parollar bir xil emas.";
+if (registerForm) {
+    registerForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        if (registerErrorEl) { registerErrorEl.textContent = ""; }
+        const username = (registerUsernameInput ? registerUsernameInput.value : "").trim();
+        const password = registerPasswordInput ? registerPasswordInput.value : "";
+        const confirmPassword = confirmPasswordInput ? confirmPasswordInput.value : "";
+
+        if (!username || password.length < 8) {
+            if (registerErrorEl) { registerErrorEl.textContent = "Username kiriting va parol kamida 8 belgi bo'lsin."; }
+            return;
         }
-        return;
-    }
+        if (confirmPasswordInput && password !== confirmPassword) {
+            if (registerErrorEl) { registerErrorEl.textContent = "Parollar bir xil emas."; }
+            return;
+        }
+        if (!sendJson({ type: "REGISTER", username: username, password: password })) {
+            if (registerErrorEl) { registerErrorEl.textContent = "Server bilan aloqa yo'q. Qayta ulanilmoqda..."; }
+            connectSocket();
+        }
+    });
+}
 
-    startAuthentication("REGISTER", username, password);
-});
-
-// ============================================
-// PROFILE / LOGOUT
-// ============================================
-
-profileMenuButton?.addEventListener("click", (event) => {
-    event.stopPropagation();
-    profileMenuEl?.classList.toggle("hidden");
-});
+if (profileMenuButton) {
+    profileMenuButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (profileMenuEl) { profileMenuEl.classList.toggle("hidden"); }
+    });
+}
 
 document.addEventListener("click", () => {
-    profileMenuEl?.classList.add("hidden");
+    if (profileMenuEl) { profileMenuEl.classList.add("hidden"); }
 });
 
-logoutButton?.addEventListener("click", () => {
-    manuallyLoggedOut = true;
-    pendingAuth = null;
-    authMode = null;
+if (logoutButton) {
+    logoutButton.addEventListener("click", () => {
+        const token = localStorage.getItem(SESSION_STORAGE_KEY);
+        sendJson({ type: "LOGOUT", token: token });
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        currentUser = null;
+        joined = false;
+        showAuthScreen();
+    });
+}
 
-    sendJson({ type: "LOGOUT" });
+if (leaveButton) {
+    leaveButton.addEventListener("click", () => { switchChat("general"); });
+}
 
-    localStorage.removeItem(SESSION_STORAGE_KEY);
+if (userSearchInput) {
+    userSearchInput.addEventListener("input", () => { renderOnlineUsers(onlineUsers); });
+}
 
-    clearTimeout(reconnectTimer);
-    clearInterval(pingTimer);
+if (sendButton) {
+    sendButton.addEventListener("click", () => sendCurrentMessage());
+}
 
-    currentUser = null;
-    joined = false;
-    onlineUsers = [];
-    conversations = { general: [] };
-
-    if (socket) {
-        const oldSocket = socket;
-        socket = null;
-
-        if (oldSocket.readyState === WebSocket.OPEN ||
-            oldSocket.readyState === WebSocket.CONNECTING) {
-            oldSocket.close();
+if (messageInput) {
+    messageInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendCurrentMessage();
         }
-    }
+    });
+}
 
-    showAuthScreen();
-    setConnectionStatus("offline", "Disconnected");
-});
+if (attachButton) {
+    attachButton.addEventListener("click", () => {
+        if (messageInput && !messageInput.disabled && fileUploadInput) {
+            fileUploadInput.click();
+        }
+    });
+}
 
-// ============================================
-// CHAT EVENTS
-// ============================================
-
-leaveButton?.addEventListener("click", () => {
-    switchChat("general");
-});
-
-userSearchInput?.addEventListener("input", () => {
-    renderOnlineUsers(onlineUsers);
-});
-
-sendButton?.addEventListener("click", () => {
-    sendCurrentMessage();
-});
-
-messageInput?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        sendCurrentMessage();
-    }
-});
-
-attachButton?.addEventListener("click", () => {
-    if (
-        messageInput &&
-        !messageInput.disabled &&
-        fileUploadInput
-    ) {
-        fileUploadInput.click();
-    }
-});
-
-fileUploadInput?.addEventListener("change", () => {
-    const file = fileUploadInput.files?.[0];
-    if (!file) return;
-
-    if (!file.type.startsWith("image/")) {
-        alert("Faqat rasm fayllarini yuborish mumkin.");
-        fileUploadInput.value = "";
-        return;
-    }
-
-    // Server max_size = 64 KB.
-    // Base64 rasm uchun kichikroq limit ishlatiladi.
-    if (file.size > 40 * 1024) {
-        alert("Hozircha rasm hajmi 40 KB dan kichik bo'lishi kerak.");
-        fileUploadInput.value = "";
-        return;
-    }
-
-    const reader = new FileReader();
-
-    reader.onload = () => {
-        if (typeof reader.result === "string") {
-            sendCurrentMessage(reader.result);
+if (fileUploadInput) {
+    fileUploadInput.addEventListener("change", () => {
+        const file = fileUploadInput.files && fileUploadInput.files[0];
+        if (!file) { return; }
+        if (!file.type.startsWith("image/")) {
+            alert("Faqat rasm fayllarini yuborish mumkin.");
+            fileUploadInput.value = "";
+            return;
+        }
+        if (file.size > 900 * 1024) {
+            alert("Rasm hajmi 900 KB dan kichik bo'lishi kerak.");
+            fileUploadInput.value = "";
+            return;
         }
 
-        fileUploadInput.value = "";
-    };
-
-    reader.readAsDataURL(file);
-});
-
-// ============================================
-// START
-// ============================================
+        const reader = new FileReader();
+        reader.onload = () => {
+            if (typeof reader.result === "string") {
+                sendCurrentMessage(reader.result);
+            }
+            fileUploadInput.value = "";
+        };
+        reader.readAsDataURL(file);
+    });
+}
 
 connectSocket();
