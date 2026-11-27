@@ -448,6 +448,16 @@ body {
     padding: 8px 10px;
     border-radius: 12px;
     background: var(--bg-soft);
+    transition: background-color 0.15s ease;
+}
+
+.online-user-item:hover {
+    background: var(--primary-light);
+}
+
+.online-user-item.active {
+    background: var(--primary-light);
+    border: 1px solid rgba(27, 67, 50, 0.25);
 }
 
 .online-user-label {
@@ -728,6 +738,12 @@ body {
     border-radius: 999px;
     flex-shrink: 0;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.online-user-chip:hover {
+    border-color: var(--primary);
+    background: var(--primary-light);
 }
 
 .user-avatar,
@@ -817,6 +833,9 @@ body {
 }
 
 .message-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: 12px;
     font-weight: 600;
     color: var(--text-muted);
@@ -887,6 +906,11 @@ body {
 .message-area input:focus {
     border-color: var(--primary);
     background: #ffffff;
+}
+
+.message-area input:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
 }
 
 .send-button {
