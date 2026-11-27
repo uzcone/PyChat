@@ -1,4 +1,3 @@
-
 import asyncio
 import asyncpg
 import base64
@@ -55,7 +54,7 @@ def field_value(record, key, default=""):
 
 async def send_json(websocket, data):
     try:
-        await websocket.send(json.dumps(data))
+        await websocket.send(json.dumps(data, default=str))
         return True
     except Exception as error:
         print("SEND ERROR:", repr(error))
@@ -80,7 +79,7 @@ def hash_password(password, salt=None):
     result = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
-        salt.encode("utf-8"),
+        str(salt).encode("utf-8"),
         PBKDF2_ITERATIONS
     ).hex()
 
@@ -89,8 +88,8 @@ def hash_password(password, salt=None):
 
 def safe_compare(first, second):
     return hmac.compare_digest(
-        str(first).lower(),
-        str(second).lower()
+        str(first).strip().lower(),
+        str(second).strip().lower()
     )
 
 
@@ -100,13 +99,12 @@ def verify_password(password, salt, stored_hash):
 
     password_bytes = password.encode("utf-8")
     stored_hash = str(stored_hash).strip()
-    salt = str(salt) if salt else ""
+    salt = str(salt).strip() if salt else ""
 
     # 1. Current PyChat PBKDF2
     if salt:
         try:
             _, calculated = hash_password(password, salt)
-
             if safe_compare(calculated, stored_hash):
                 return True
         except Exception:
@@ -116,14 +114,10 @@ def verify_password(password, salt, stored_hash):
     if stored_hash.startswith("pbkdf2_sha256$"):
         try:
             parts = stored_hash.split("$")
-
             if len(parts) == 4:
                 iterations = int(parts[1])
                 encoded_salt = parts[2]
-                expected = base64.b64decode(
-                    parts[3],
-                    validate=True
-                )
+                expected = base64.b64decode(parts[3], validate=True)
 
                 calculated = hashlib.pbkdf2_hmac(
                     "sha256",
@@ -131,7 +125,6 @@ def verify_password(password, salt, stored_hash):
                     encoded_salt.encode("utf-8"),
                     iterations
                 )
-
                 if hmac.compare_digest(calculated, expected):
                     return True
         except Exception:
@@ -140,11 +133,7 @@ def verify_password(password, salt, stored_hash):
     # 3. Legacy PBKDF2 variants
     if salt:
         for algorithm in ("sha256", "sha1", "sha512"):
-            for iterations in (
-                10000, 50000, 100000, 120000,
-                150000, 200000, 260000,
-                310000, 390000, 600000
-            ):
+            for iterations in (10000, 100000, 260000, 310000, 600000):
                 try:
                     calculated = hashlib.pbkdf2_hmac(
                         algorithm,
@@ -152,7 +141,6 @@ def verify_password(password, salt, stored_hash):
                         salt.encode("utf-8"),
                         iterations
                     ).hex()
-
                     if safe_compare(calculated, stored_hash):
                         return True
                 except Exception:
@@ -168,14 +156,9 @@ def verify_password(password, salt, stored_hash):
 
     if re.fullmatch(r"[0-9a-fA-F]+", stored_hash):
         algorithm = algorithms.get(len(stored_hash))
-
         if algorithm:
             try:
-                calculated = hashlib.new(
-                    algorithm,
-                    password_bytes
-                ).hexdigest()
-
+                calculated = hashlib.new(algorithm, password_bytes).hexdigest()
                 if safe_compare(calculated, stored_hash):
                     return True
             except Exception:
@@ -183,23 +166,15 @@ def verify_password(password, salt, stored_hash):
 
     # 5. Salted algorithm$salt$hash
     parts = stored_hash.split("$")
-
     if len(parts) == 3:
         algorithm, encoded_salt, expected = parts
-
-        if algorithm.lower() in (
-            "md5", "sha1", "sha256", "sha512"
-        ):
-            for candidate in (
-                encoded_salt + password,
-                password + encoded_salt
-            ):
+        if algorithm.lower() in ("md5", "sha1", "sha256", "sha512"):
+            for candidate in (encoded_salt + password, password + encoded_salt):
                 try:
                     calculated = hashlib.new(
                         algorithm.lower(),
                         candidate.encode("utf-8")
                     ).hexdigest()
-
                     if safe_compare(calculated, expected):
                         return True
                 except Exception:
@@ -209,7 +184,6 @@ def verify_password(password, salt, stored_hash):
     if stored_hash.startswith(("$2a$", "$2b$", "$2y$")):
         try:
             import bcrypt
-
             return bcrypt.checkpw(
                 password_bytes,
                 stored_hash.encode("utf-8")
@@ -227,7 +201,6 @@ def is_current_password_hash(password, salt, stored_hash):
         return False
 
     _, calculated = hash_password(password, str(salt))
-
     return safe_compare(calculated, stored_hash)
 
 
@@ -242,7 +215,7 @@ async def upgrade_password_hash(user_id, password):
             WHERE id = $3
         """, salt, new_hash, user_id)
 
-    print("PASSWORD HASH UPGRADED")
+    print("PASSWORD HASH UPGRADED FOR USER_ID:", user_id)
 
 
 # =========================================
@@ -254,9 +227,7 @@ def create_session_token():
 
 
 def hash_session_token(token):
-    return hashlib.sha256(
-        token.encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 # =========================================
@@ -278,9 +249,7 @@ async def load_database_columns(connection):
 
     for row in rows:
         table = row["table_name"]
-
         DB_COLUMNS.setdefault(table, {})
-
         DB_COLUMNS[table][row["column_name"]] = {
             "nullable": row["is_nullable"] == "YES"
         }
@@ -288,11 +257,7 @@ async def load_database_columns(connection):
 
 def require_columns(table, required):
     existing = DB_COLUMNS.get(table, {})
-
-    missing = [
-        column for column in required
-        if column not in existing
-    ]
+    missing = [column for column in required if column not in existing]
 
     if missing:
         raise RuntimeError(
@@ -320,7 +285,6 @@ async def init_database():
     )
 
     async with db_pool.acquire() as connection:
-
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -384,13 +348,8 @@ async def init_database():
             "content", "created_at"
         ])
 
-        user_count = await connection.fetchval(
-            "SELECT COUNT(*) FROM users"
-        )
-
-        message_count = await connection.fetchval(
-            "SELECT COUNT(*) FROM messages"
-        )
+        user_count = await connection.fetchval("SELECT COUNT(*) FROM users")
+        message_count = await connection.fetchval("SELECT COUNT(*) FROM messages")
 
         print("EXISTING USERS:", user_count)
         print("EXISTING MESSAGES:", message_count)
@@ -411,6 +370,10 @@ def get_avatar(user):
 
 
 async def get_user(username):
+    clean_name = str(username or "").strip()
+    if not clean_name:
+        return None
+
     async with db_pool.acquire() as connection:
         return await connection.fetchrow("""
             SELECT
@@ -418,14 +381,22 @@ async def get_user(username):
                 password_hash, avatar,
                 avatar_type, avatar_value, created_at
             FROM users
-            WHERE username = $1
-        """, username)
+            WHERE LOWER(username) = LOWER($1)
+        """, clean_name)
 
 
 async def create_user(username, password):
+    clean_name = str(username or "").strip()
     salt, password_hash_value = hash_password(password)
 
     async with db_pool.acquire() as connection:
+        existing = await connection.fetchval("""
+            SELECT id FROM users WHERE LOWER(username) = LOWER($1)
+        """, clean_name)
+
+        if existing is not None:
+            return None
+
         try:
             return await connection.fetchrow("""
                 INSERT INTO users (
@@ -434,22 +405,9 @@ async def create_user(username, password):
                 )
                 VALUES ($1, $2, $3, '', '', '')
                 RETURNING *
-            """,
-                username,
-                salt,
-                password_hash_value
-            )
+            """, clean_name, salt, password_hash_value)
         except asyncpg.UniqueViolationError:
             return None
-
-
-async def update_user_avatar(username, avatar):
-    async with db_pool.acquire() as connection:
-        await connection.execute("""
-            UPDATE users
-            SET avatar = $1, avatar_value = $1
-            WHERE username = $2
-        """, avatar, username)
 
 
 # =========================================
@@ -459,7 +417,6 @@ async def update_user_avatar(username, avatar):
 async def save_session(user_id):
     token = create_session_token()
     token_hash = hash_session_token(token)
-
     expires_at = utc_now() + timedelta(days=SESSION_DAYS)
 
     async with db_pool.acquire() as connection:
@@ -526,24 +483,17 @@ async def online_users():
 
 async def broadcast_packet(packet):
     async with clients_lock:
-        sockets = [
-            item["websocket"]
-            for item in clients.values()
-        ]
+        sockets = [item["websocket"] for item in clients.values()]
 
     if sockets:
         await asyncio.gather(
-            *[
-                send_json(socket, packet)
-                for socket in sockets
-            ],
+            *[send_json(socket, packet) for socket in sockets],
             return_exceptions=True
         )
 
 
 async def update_users():
     users = await online_users()
-
     await broadcast_packet(
         create_packet(
             "USERS",
@@ -553,14 +503,11 @@ async def update_users():
     )
 
 
-async def register_connection(
-    websocket, username, user_id, token_hash
-):
+async def register_connection(websocket, username, user_id, token_hash):
     old_websocket = None
 
     async with clients_lock:
         old_client = clients.get(username)
-
         if old_client:
             old_websocket = old_client["websocket"]
 
@@ -588,7 +535,6 @@ async def remove_connection(websocket, username):
 
     async with clients_lock:
         current = clients.get(username)
-
         if current and current["websocket"] == websocket:
             del clients[username]
             removed = True
@@ -603,7 +549,6 @@ async def remove_connection(websocket, username):
 
 async def save_message(username, message):
     async with db_pool.acquire() as connection:
-
         user_id = await connection.fetchval("""
             SELECT id FROM users WHERE username = $1
         """, username)
@@ -611,14 +556,8 @@ async def save_message(username, message):
         if user_id is None:
             raise RuntimeError("Message sender not found.")
 
-        recipient_nullable = (
-            DB_COLUMNS["messages"]["recipient_id"]["nullable"]
-        )
-
-        recipient_id = None
-
-        if not recipient_nullable:
-            recipient_id = user_id
+        recipient_nullable = DB_COLUMNS["messages"]["recipient_id"]["nullable"]
+        recipient_id = None if recipient_nullable else user_id
 
         return await connection.fetchrow("""
             INSERT INTO messages (
@@ -661,20 +600,14 @@ async def send_history(websocket):
         for row in rows
     ]
 
-    await send_packet(
-        websocket,
-        "HISTORY",
-        messages=history
-    )
+    await send_packet(websocket, "HISTORY", messages=history)
 
 
 # =========================================
 # AUTHENTICATION SUCCESS
 # =========================================
 
-async def finish_authentication(
-    websocket, user, token, token_hash, expires_at
-):
+async def finish_authentication(websocket, user, token, token_hash, expires_at):
     username = field_value(user, "username")
 
     await register_connection(
@@ -710,7 +643,6 @@ async def finish_authentication(
 # =========================================
 
 async def authenticate_connection(websocket):
-
     try:
         raw_message = await asyncio.wait_for(
             websocket.recv(),
@@ -722,18 +654,17 @@ async def authenticate_connection(websocket):
         if not isinstance(packet, dict):
             raise ValueError("Invalid authentication packet.")
 
-        packet_type = packet.get("type")
+        packet_type = str(packet.get("type", "")).upper()
 
         # REGISTER
         if packet_type == "REGISTER":
-
             username = str(packet.get("username", "")).strip()
             password = str(packet.get("password", ""))
 
-            if len(username) < 3 or len(username) > 20:
+            if not re.fullmatch(r"[a-zA-Z0-9_]{3,30}", username):
                 await send_packet(
                     websocket, "ERROR",
-                    message="Username must be 3-20 characters."
+                    message="Username must be 3-30 letters, numbers or underscores."
                 )
                 return None
 
@@ -759,17 +690,24 @@ async def authenticate_connection(websocket):
                 websocket, user, token, token_hash, expires_at
             )
 
-            return username
+            return user["username"]
 
         # LOGIN
         if packet_type == "LOGIN":
-
             username = str(packet.get("username", "")).strip()
             password = str(packet.get("password", ""))
+
+            if not username or not password:
+                await send_packet(
+                    websocket, "ERROR",
+                    message="Username and password are required."
+                )
+                return None
 
             user = await get_user(username)
 
             if not user:
+                print(f"LOGIN FAILED: user not found -> {username!r}")
                 await send_packet(
                     websocket, "ERROR",
                     message="Invalid username or password."
@@ -780,17 +718,16 @@ async def authenticate_connection(websocket):
             stored_hash = field_value(user, "password_hash", None)
 
             if not verify_password(password, stored_salt, stored_hash):
+                print(f"LOGIN FAILED: wrong password for -> {user['username']!r}")
                 await send_packet(
                     websocket, "ERROR",
                     message="Invalid username or password."
                 )
                 return None
 
-            if not is_current_password_hash(
-                password, stored_salt, stored_hash
-            ):
+            if not is_current_password_hash(password, stored_salt, stored_hash):
                 await upgrade_password_hash(user["id"], password)
-                user = await get_user(username)
+                user = await get_user(user["username"])
 
             token, token_hash, expires_at = await save_session(user["id"])
 
@@ -798,11 +735,10 @@ async def authenticate_connection(websocket):
                 websocket, user, token, token_hash, expires_at
             )
 
-            return username
+            return user["username"]
 
         # RESUME
         if packet_type == "RESUME":
-
             token = str(packet.get("token", ""))
 
             if not token:
@@ -854,7 +790,6 @@ async def authenticate_connection(websocket):
 
     except Exception as error:
         print("AUTHENTICATION ERROR:", repr(error))
-
         await send_packet(
             websocket, "ERROR",
             message="Authentication failed."
@@ -867,25 +802,19 @@ async def authenticate_connection(websocket):
 # =========================================
 
 async def handle_client(websocket):
-
     username = None
-
     print("NEW WEBSOCKET CONNECTION")
 
     try:
         username = await authenticate_connection(websocket)
-
         if not username:
             return
 
         async for raw_message in websocket:
-
             try:
                 packet = json.loads(raw_message)
-
                 if not isinstance(packet, dict):
                     raise ValueError("Invalid packet.")
-
             except Exception:
                 await send_packet(
                     websocket, "ERROR",
@@ -893,14 +822,10 @@ async def handle_client(websocket):
                 )
                 continue
 
-            packet_type = packet.get("type")
+            packet_type = str(packet.get("type", "")).upper()
 
             if packet_type == "MESSAGE":
-
-                message = str(
-                    packet.get("message", "")
-                ).strip()
-
+                message = str(packet.get("message", "")).strip()
                 if not message:
                     continue
 
@@ -924,13 +849,10 @@ async def handle_client(websocket):
                 )
 
             elif packet_type == "PING":
-
                 await send_packet(websocket, "PONG")
 
             elif packet_type == "USERS":
-
                 users = await online_users()
-
                 await send_packet(
                     websocket,
                     "USERS",
@@ -939,25 +861,17 @@ async def handle_client(websocket):
                 )
 
             elif packet_type == "LEAVE":
-
-                await websocket.close(
-                    code=1000,
-                    reason="User left."
-                )
+                await websocket.close(code=1000, reason="User left.")
                 break
 
             elif packet_type == "LOGOUT":
-
                 async with clients_lock:
                     current = clients.get(username)
 
                 if current and current["websocket"] == websocket:
                     await delete_user_sessions(current["user_id"])
 
-                await websocket.close(
-                    code=1000,
-                    reason="User logged out."
-                )
+                await websocket.close(code=1000, reason="User logged out.")
                 break
 
             else:
@@ -981,9 +895,12 @@ async def handle_client(websocket):
 # =========================================
 
 async def process_request(connection, request):
-    if request.method == "HEAD":
-        return connection.respond(200, "")
-
+    try:
+        method = getattr(request, "method", "")
+        if method == "HEAD":
+            return connection.respond(200, "")
+    except Exception:
+        pass
     return None
 
 
@@ -992,7 +909,6 @@ async def process_request(connection, request):
 # =========================================
 
 async def main():
-
     print("================================")
     print("PYCHAT SERVER STARTING")
     print("DATABASE URL EXISTS:", bool(DATABASE_URL))
@@ -1013,7 +929,7 @@ async def main():
             handle_client,
             HOST,
             PORT,
-            max_size=64 * 1024,
+            max_size=256 * 1024,
             ping_interval=20,
             ping_timeout=20,
             process_request=process_request
@@ -1032,12 +948,9 @@ async def main():
 # =========================================
 
 if __name__ == "__main__":
-
     try:
         asyncio.run(main())
-
     except KeyboardInterrupt:
         print("SERVER STOPPED")
-
     except Exception as error:
         print("SERVER STARTUP ERROR:", repr(error))
