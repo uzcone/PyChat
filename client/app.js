@@ -65,9 +65,13 @@ const sendButton = document.getElementById("sendButton");
 const userList = document.getElementById("userList");
 const userCount = document.getElementById("userCount");
 
-// Yuqoridagi online users qismi
+// Header ichidagi online users qismi
 const topOnlineUsers = document.getElementById("topOnlineUsers");
 const topOnlineCount = document.getElementById("topOnlineCount");
+
+// "Online now" bloki
+const onlineNowUsers = document.getElementById("onlineNowUsers");
+const onlineNowCount = document.getElementById("onlineNowCount");
 
 const statusDot = document.getElementById("statusDot");
 const connectionStatus = document.getElementById("connectionStatus");
@@ -135,12 +139,7 @@ function getPacketErrorMessage(packet, fallback = "Authentication failed.") {
     if (!packet || typeof packet !== "object") {
         return fallback;
     }
-    return (
-        packet.message ||
-        packet.error ||
-        packet.reason ||
-        fallback
-    );
+    return packet.message || packet.error || packet.reason || fallback;
 }
 
 
@@ -153,10 +152,7 @@ function showLoginForm() {
     if (registerForm) registerForm.classList.add("hidden");
 
     if (authTitle) authTitle.textContent = "Welcome back";
-
-    if (authSubtitle) {
-        authSubtitle.textContent = "Sign in to continue to PyChat";
-    }
+    if (authSubtitle) authSubtitle.textContent = "Sign in to continue to PyChat";
 
     if (loginError) loginError.textContent = "";
     if (registerError) registerError.textContent = "";
@@ -167,10 +163,7 @@ function showRegisterForm() {
     if (registerForm) registerForm.classList.remove("hidden");
 
     if (authTitle) authTitle.textContent = "Create account";
-
-    if (authSubtitle) {
-        authSubtitle.textContent = "Join the PyChat community";
-    }
+    if (authSubtitle) authSubtitle.textContent = "Join the PyChat community";
 
     if (loginError) loginError.textContent = "";
     if (registerError) registerError.textContent = "";
@@ -223,8 +216,7 @@ function showChatImmediately(savedUsername) {
     }
 
     if (myAvatar) {
-        myAvatar.textContent =
-            username.charAt(0).toUpperCase() || "U";
+        myAvatar.textContent = username.charAt(0).toUpperCase() || "U";
     }
 
     if (loginScreen) loginScreen.classList.add("hidden");
@@ -251,7 +243,6 @@ function togglePassword(input, button) {
     if (!input || !button) return;
 
     const visible = input.type === "password";
-
     input.type = visible ? "text" : "password";
     button.textContent = visible ? "Hide" : "Show";
 }
@@ -271,20 +262,15 @@ function saveSession(token, savedUsername, expiresAt) {
             expires_at: expiresAt || null
         };
 
-        localStorage.setItem(
-            SESSION_STORAGE_KEY,
-            JSON.stringify(session)
-        );
+        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
 
         sessionToken = token;
         sessionExpiresAt = expiresAt || null;
         username = session.username;
 
         localStorage.removeItem(STORAGE_KEY);
-
         legacyCredentials = null;
         autoLoginEnabled = true;
-
     } catch (error) {
         console.error("Session storage error:", error);
     }
@@ -293,11 +279,9 @@ function saveSession(token, savedUsername, expiresAt) {
 function loadSession() {
     try {
         const saved = localStorage.getItem(SESSION_STORAGE_KEY);
-
         if (!saved) return null;
 
         const session = JSON.parse(saved);
-
         if (
             !session ||
             typeof session.token !== "string" ||
@@ -320,7 +304,6 @@ function loadSession() {
         }
 
         return session;
-
     } catch (error) {
         console.error("Session loading error:", error);
         return null;
@@ -330,11 +313,9 @@ function loadSession() {
 function loadLegacyAccount() {
     try {
         const saved = localStorage.getItem(STORAGE_KEY);
-
         if (!saved) return null;
 
         const account = JSON.parse(saved);
-
         if (
             !account ||
             typeof account.username !== "string" ||
@@ -346,7 +327,6 @@ function loadLegacyAccount() {
         }
 
         return account;
-
     } catch (error) {
         console.error("Legacy account loading error:", error);
         return null;
@@ -360,7 +340,6 @@ function removeSavedSession() {
     sessionToken = null;
     sessionExpiresAt = null;
     legacyCredentials = null;
-
     autoLoginEnabled = false;
 }
 
@@ -371,7 +350,6 @@ function removeSavedSession() {
 
 function requestOnlineUsers() {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-        console.log("Cannot request users: socket is not open.");
         return;
     }
 
@@ -380,8 +358,6 @@ function requestOnlineUsers() {
     socket.send(JSON.stringify({
         type: "USERS"
     }));
-
-    console.log("Online users requested.");
 }
 
 
@@ -391,7 +367,6 @@ function requestOnlineUsers() {
 
 function connectAndAuthenticate(type, data) {
     return new Promise((resolve, reject) => {
-
         if (connectionInProgress) {
             reject(new Error("Connection is already in progress."));
             return;
@@ -418,12 +393,7 @@ function connectAndAuthenticate(type, data) {
 
         const timeout = setTimeout(() => {
             const err = new Error("Connection timed out. Please try again.");
-            fail(err);
-            detachSocketListeners(ws);
-            try {
-                ws.close();
-            } catch (_) {}
-            if (socket === ws) socket = null;
+            fail(err, true);
         }, 30000);
 
         function finish() {
@@ -460,7 +430,6 @@ function connectAndAuthenticate(type, data) {
             if (settled || socket !== ws) return;
 
             setStatus(false, "Authenticating...");
-
             ws.send(JSON.stringify({
                 type: type,
                 ...data
@@ -471,7 +440,6 @@ function connectAndAuthenticate(type, data) {
             if (socket !== ws) return;
 
             let packet;
-
             try {
                 packet = JSON.parse(event.data);
             } catch (error) {
@@ -510,7 +478,6 @@ function connectAndAuthenticate(type, data) {
                 return;
             }
 
-            // Auth allaqachon tugagan (muvaffaqiyatli bo'lgan) holatda uzilish
             if (wasJoined && autoLoginEnabled && !manualDisconnect) {
                 setStatus(false, "Reconnecting...");
                 scheduleReconnect();
@@ -528,9 +495,7 @@ function connectAndAuthenticate(type, data) {
 
 function authenticateWithSession() {
     if (!sessionToken) {
-        return Promise.reject(
-            new Error("No saved session token.")
-        );
+        return Promise.reject(new Error("No saved session token."));
     }
 
     return connectAndAuthenticate("RESUME", {
@@ -540,9 +505,7 @@ function authenticateWithSession() {
 
 function authenticateWithLegacyAccount() {
     if (!legacyCredentials) {
-        return Promise.reject(
-            new Error("No saved account.")
-        );
+        return Promise.reject(new Error("No saved account."));
     }
 
     return connectAndAuthenticate("LOGIN", {
@@ -560,11 +523,7 @@ function scheduleReconnect() {
     if (!autoLoginEnabled || manualDisconnect) return;
     if (reconnectTimer) return;
 
-    const delay = Math.min(
-        2000 * Math.pow(2, reconnectAttempts),
-        30000
-    );
-
+    const delay = Math.min(2000 * Math.pow(2, reconnectAttempts), 30000);
     reconnectAttempts++;
 
     setStatus(false, "Reconnecting...");
@@ -577,10 +536,8 @@ function scheduleReconnect() {
         try {
             if (sessionToken) {
                 await authenticateWithSession();
-
             } else if (legacyCredentials) {
                 await authenticateWithLegacyAccount();
-
             } else {
                 autoLoginEnabled = false;
                 showLogin();
@@ -588,15 +545,11 @@ function scheduleReconnect() {
             }
 
             reconnectAttempts = 0;
-
         } catch (error) {
-            console.log("Reconnect failed:", error.message);
-
             if (autoLoginEnabled && !manualDisconnect) {
                 scheduleReconnect();
             }
         }
-
     }, delay);
 }
 
@@ -612,24 +565,16 @@ function handlePacket(packet, onSuccess, onError) {
     if (!packetType) return;
 
     switch (packetType) {
-
         case "WELCOME": {
             joined = true;
             reconnectAttempts = 0;
-
             username = packet.username || username;
 
             if (packet.token) {
-                saveSession(
-                    packet.token,
-                    username,
-                    packet.expires_at
-                );
+                saveSession(packet.token, username, packet.expires_at);
             }
 
-            autoLoginEnabled = Boolean(
-                sessionToken || autoLoginEnabled
-            );
+            autoLoginEnabled = Boolean(sessionToken || autoLoginEnabled);
 
             setStatus(true, "Connected");
             updateSendAvailability();
@@ -639,8 +584,7 @@ function handlePacket(packet, onSuccess, onError) {
             }
 
             if (myAvatar) {
-                myAvatar.textContent =
-                    username.charAt(0).toUpperCase() || "U";
+                myAvatar.textContent = username.charAt(0).toUpperCase() || "U";
             }
 
             if (messages) {
@@ -655,45 +599,29 @@ function handlePacket(packet, onSuccess, onError) {
             }
 
             if (chatSubtitle) {
-                chatSubtitle.textContent =
-                    "Welcome to the PyChat community";
+                chatSubtitle.textContent = "Welcome to the PyChat community";
             }
 
             addNotice(packet.message || "Welcome to PyChat!");
-
-            // Muhim: login tugagach online usersni so'rash
             requestOnlineUsers();
 
             if (typeof onSuccess === "function") {
                 onSuccess();
             }
-
             break;
         }
 
         case "HISTORY": {
-            const history = Array.isArray(packet.messages)
-                ? packet.messages
-                : [];
-
+            const history = Array.isArray(packet.messages) ? packet.messages : [];
             history.forEach((item) => {
                 if (!item) return;
-
-                addMessage(
-                    item.username || "User",
-                    item.message || ""
-                );
+                addMessage(item.username || "User", item.message || "");
             });
-
             break;
         }
 
         case "MESSAGE": {
-            addMessage(
-                packet.username || "User",
-                packet.message || ""
-            );
-
+            addMessage(packet.username || "User", packet.message || "");
             break;
         }
 
@@ -703,28 +631,18 @@ function handlePacket(packet, onSuccess, onError) {
         }
 
         case "USERS": {
-            const users = Array.isArray(packet.users)
-                ? packet.users
-                : [];
-
-            console.log("SERVER ONLINE USERS:", users);
-            console.log("SERVER ONLINE COUNT:", packet.count);
-
+            const users = Array.isArray(packet.users) ? packet.users : [];
             updateUsers(users, packet.count);
             break;
         }
 
         case "ERROR": {
-            const error = new Error(
-                getPacketErrorMessage(packet, "Authentication failed.")
-            );
-
+            const error = new Error(getPacketErrorMessage(packet, "Authentication failed."));
             if (!joined && typeof onError === "function") {
                 onError(error);
             } else {
                 addNotice("Error: " + error.message);
             }
-
             break;
         }
 
@@ -735,7 +653,7 @@ function handlePacket(packet, onSuccess, onError) {
 
 
 // =====================================
-// LOGIN
+// LOGIN & REGISTER
 // =====================================
 
 async function login() {
@@ -746,10 +664,8 @@ async function login() {
 
     if (!name || !password) {
         if (loginError) {
-            loginError.textContent =
-                "Please enter your username and password.";
+            loginError.textContent = "Please enter your username and password.";
         }
-
         return;
     }
 
@@ -761,16 +677,13 @@ async function login() {
     manualDisconnect = false;
     autoLoginEnabled = false;
 
-    const credentials = {
-        username: name,
-        password: password
-    };
-
     try {
-        await connectAndAuthenticate("LOGIN", credentials);
+        await connectAndAuthenticate("LOGIN", {
+            username: name,
+            password: password
+        });
 
         if (loginPassword) loginPassword.value = "";
-
     } catch (error) {
         if (loginError) {
             loginError.textContent = error.message;
@@ -783,11 +696,6 @@ async function login() {
     }
 }
 
-
-// =====================================
-// REGISTER
-// =====================================
-
 async function register() {
     const name = registerUsername?.value.trim() || "";
     const password = registerPassword?.value || "";
@@ -799,25 +707,20 @@ async function register() {
         if (registerError) {
             registerError.textContent = "Please complete all fields.";
         }
-
         return;
     }
 
     if (!/^[a-zA-Z0-9_]{3,30}$/.test(name)) {
         if (registerError) {
-            registerError.textContent =
-                "Use 3-30 letters, numbers or underscores.";
+            registerError.textContent = "Use 3-30 letters, numbers or underscores.";
         }
-
         return;
     }
 
     if (password.length < 8 || password.length > 128) {
         if (registerError) {
-            registerError.textContent =
-                "Password must contain 8-128 characters.";
+            registerError.textContent = "Password must contain 8-128 characters.";
         }
-
         return;
     }
 
@@ -825,7 +728,6 @@ async function register() {
         if (registerError) {
             registerError.textContent = "Passwords do not match.";
         }
-
         return;
     }
 
@@ -837,17 +739,14 @@ async function register() {
     manualDisconnect = false;
     autoLoginEnabled = false;
 
-    const credentials = {
-        username: name,
-        password: password
-    };
-
     try {
-        await connectAndAuthenticate("REGISTER", credentials);
+        await connectAndAuthenticate("REGISTER", {
+            username: name,
+            password: password
+        });
 
         if (registerPassword) registerPassword.value = "";
         if (confirmPassword) confirmPassword.value = "";
-
     } catch (error) {
         if (registerError) {
             registerError.textContent = error.message;
@@ -867,10 +766,7 @@ async function register() {
 
 async function automaticLogin() {
     const savedSession = loadSession();
-
-    const savedAccount = savedSession
-        ? null
-        : loadLegacyAccount();
+    const savedAccount = savedSession ? null : loadLegacyAccount();
 
     if (!savedSession && !savedAccount) {
         removeSavedSession();
@@ -886,32 +782,22 @@ async function automaticLogin() {
         sessionToken = savedSession.token;
         sessionExpiresAt = savedSession.expires_at;
         username = savedSession.username;
-
         showChatImmediately(username);
-
     } else {
         legacyCredentials = savedAccount;
         username = savedAccount.username;
-
         showChatImmediately(username);
     }
 
     try {
         if (savedSession) {
             await authenticateWithSession();
-
         } else {
             await authenticateWithLegacyAccount();
         }
 
         reconnectAttempts = 0;
-
     } catch (error) {
-        console.log(
-            "Automatic authentication failed:",
-            error.message
-        );
-
         clearReconnectTimer();
 
         const message = (error.message || "").toLowerCase();
@@ -921,7 +807,7 @@ async function automaticLogin() {
             message.includes("unable to connect") ||
             message.includes("network");
 
-        if (savedSession && !isNetworkError) {
+        if (!isNetworkError) {
             removeSavedSession();
             showLogin();
             showLoginForm();
@@ -929,14 +815,6 @@ async function automaticLogin() {
             if (loginError) {
                 loginError.textContent =
                     error.message || "Your session has expired. Please sign in again.";
-            }
-        } else if (!isNetworkError) {
-            removeSavedSession();
-            showLogin();
-            showLoginForm();
-
-            if (loginError) {
-                loginError.textContent = error.message;
             }
         } else {
             setStatus(false, "Reconnecting...");
@@ -947,14 +825,13 @@ async function automaticLogin() {
 
 
 // =====================================
-// SEND MESSAGE
+// MESSAGES & NOTICES
 // =====================================
 
 function sendMessage() {
     if (!messageInput || !joined) return;
 
     const text = messageInput.value.trim();
-
     if (!text) return;
 
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -971,22 +848,14 @@ function sendMessage() {
     messageInput.focus();
 }
 
-
-// =====================================
-// DISPLAY MESSAGE
-// =====================================
-
 function addMessage(sender, text) {
     if (!messages) return;
 
     const emptyState = messages.querySelector(".empty-state");
-
     if (emptyState) emptyState.remove();
 
     const message = document.createElement("div");
-
-    message.className =
-        "message" + (sender === username ? " mine" : "");
+    message.className = "message" + (sender === username ? " mine" : "");
 
     const meta = document.createElement("div");
     meta.className = "message-meta";
@@ -997,21 +866,14 @@ function addMessage(sender, text) {
     bubble.textContent = text;
 
     message.append(meta, bubble);
-
     messages.appendChild(message);
     messages.scrollTop = messages.scrollHeight;
 }
-
-
-// =====================================
-// SYSTEM NOTICE
-// =====================================
 
 function addNotice(text) {
     if (!messages) return;
 
     const notice = document.createElement("div");
-
     notice.className = "notice";
     notice.textContent = text;
 
@@ -1025,79 +887,64 @@ function addNotice(text) {
 // =====================================
 
 function createOnlineUserElement(name, compact = false) {
-    const item = document.createElement(
-        compact ? "div" : "li"
-    );
-
-    item.className = compact
-        ? "online-user-chip"
-        : "online-user-item";
+    const item = document.createElement(compact ? "div" : "li");
+    item.className = compact ? "online-user-chip" : "online-user-item";
 
     const avatar = document.createElement("div");
-
-    avatar.className = compact
-        ? "user-avatar online-user-avatar"
-        : "user-avatar";
-
+    avatar.className = compact ? "user-avatar online-user-avatar" : "user-avatar";
     avatar.textContent = name.charAt(0).toUpperCase();
 
     const label = document.createElement("span");
-
-    label.className = compact
-        ? "online-user-name"
-        : "online-user-label";
-
+    label.className = compact ? "online-user-name" : "online-user-label";
     label.textContent = name;
 
     const indicator = document.createElement("span");
     indicator.className = "online-indicator";
 
     item.append(avatar, label, indicator);
-
     return item;
 }
 
 function updateUsers(users, serverCount) {
-    const validUsers = users
-        .map((user) => {
-            if (typeof user === "string") {
-                return user;
-            }
+    const validUsers = (Array.isArray(users) ? users : [])
+        .map((user) => (typeof user === "string" ? user : user?.username || ""))
+        .filter((name) => typeof name === "string" && name.trim().length > 0);
 
-            return user?.username || "";
-        })
-        .filter((name) => typeof name === "string" && name.length > 0);
-
-    // Takroriy username'larni olib tashlash
     const uniqueUsers = [...new Set(validUsers)];
 
     const count = Number.isFinite(Number(serverCount))
         ? Number(serverCount)
         : uniqueUsers.length;
 
-    // Sidebar ro'yxati
     if (userList) {
         userList.replaceChildren();
-
         uniqueUsers.forEach((name) => {
-            userList.appendChild(
-                createOnlineUserElement(name, false)
-            );
+            userList.appendChild(createOnlineUserElement(name, false));
         });
     }
 
-    // Yuqoridagi online users qismi
     if (topOnlineUsers) {
         topOnlineUsers.replaceChildren();
-
         uniqueUsers.forEach((name) => {
-            topOnlineUsers.appendChild(
-                createOnlineUserElement(name, true)
-            );
+            topOnlineUsers.appendChild(createOnlineUserElement(name, true));
         });
     }
 
-    // Online sonini yangilash
+    if (onlineNowUsers) {
+        onlineNowUsers.replaceChildren();
+
+        if (uniqueUsers.length === 0) {
+            const empty = document.createElement("span");
+            empty.className = "top-online-empty";
+            empty.textContent = "Hozircha online foydalanuvchilar yo‘q";
+            onlineNowUsers.appendChild(empty);
+        } else {
+            uniqueUsers.forEach((name) => {
+                onlineNowUsers.appendChild(createOnlineUserElement(name, true));
+            });
+        }
+    }
+
     if (userCount) {
         userCount.textContent = String(count);
     }
@@ -1106,8 +953,9 @@ function updateUsers(users, serverCount) {
         topOnlineCount.textContent = String(count);
     }
 
-    console.log("ONLINE USERS UPDATED:", uniqueUsers);
-    console.log("ONLINE TOTAL:", count);
+    if (onlineNowCount) {
+        onlineNowCount.textContent = `${count} online`;
+    }
 }
 
 function clearOnlineUsers() {
@@ -1119,6 +967,14 @@ function clearOnlineUsers() {
         topOnlineUsers.replaceChildren();
     }
 
+    if (onlineNowUsers) {
+        onlineNowUsers.replaceChildren();
+        const empty = document.createElement("span");
+        empty.className = "top-online-empty";
+        empty.textContent = "Hozircha online foydalanuvchilar yo‘q";
+        onlineNowUsers.appendChild(empty);
+    }
+
     if (userCount) {
         userCount.textContent = "0";
     }
@@ -1126,16 +982,19 @@ function clearOnlineUsers() {
     if (topOnlineCount) {
         topOnlineCount.textContent = "0";
     }
+
+    if (onlineNowCount) {
+        onlineNowCount.textContent = "0 online";
+    }
 }
 
 
 // =====================================
-// AVATAR PREVIEW
+// AVATAR & PROFILE MENU
 // =====================================
 
 avatarUpload?.addEventListener("change", () => {
     const file = avatarUpload.files?.[0];
-
     if (!file) return;
 
     if (!file.type.startsWith("image/")) {
@@ -1151,25 +1010,17 @@ avatarUpload?.addEventListener("change", () => {
     }
 
     const reader = new FileReader();
-
     reader.onload = () => {
         if (myAvatarImage) {
             myAvatarImage.src = reader.result;
             myAvatarImage.classList.remove("hidden");
         }
-
         if (myAvatar) {
             myAvatar.classList.add("hidden");
         }
     };
-
     reader.readAsDataURL(file);
 });
-
-
-// =====================================
-// PROFILE MENU
-// =====================================
 
 profileMenuButton?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1196,7 +1047,7 @@ document.addEventListener("click", (event) => {
 
 
 // =====================================
-// LEAVE CHAT
+// LEAVE & LOGOUT
 // =====================================
 
 function leaveChat() {
@@ -1224,11 +1075,6 @@ function leaveChat() {
     showLogin();
 }
 
-
-// =====================================
-// LOGOUT
-// =====================================
-
 function logout() {
     manualDisconnect = true;
     joined = false;
@@ -1255,7 +1101,6 @@ function logout() {
     }
 
     removeSavedSession();
-
     updateSendAvailability();
 
     if (loginPassword) loginPassword.value = "";
@@ -1264,7 +1109,6 @@ function logout() {
     if (myAvatarImage) {
         myAvatarImage.classList.add("hidden");
     }
-
     if (myAvatar) {
         myAvatar.classList.remove("hidden");
     }
