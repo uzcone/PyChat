@@ -5,12 +5,10 @@ import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from http import HTTPStatus
 from typing import Any
 
 import asyncpg
 import websockets
-from websockets.http11 import Response
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
@@ -19,7 +17,6 @@ SESSION_TTL_DAYS = 30
 MAX_MESSAGE_CHARS = 2000
 MAX_IMAGE_CHARS = 1_500_000
 
-# active_sockets: ws -> {"user": str | None}
 active_sockets: dict[Any, dict[str, Any]] = {}
 db_pool: asyncpg.Pool | None = None
 
@@ -447,14 +444,15 @@ async def ws_handler(ws: Any) -> None:
             await broadcast_online_users()
 
 
-async def health_check(connection: Any, request: Any) -> Response | None:
-    upgrade = (request.headers.get("Upgrade") or "").lower()
-    if upgrade != "websocket":
-        return Response(
-            HTTPStatus.OK,
-            "OK\n",
-            websockets.Headers([("Content-Type", "text/plain; charset=utf-8")]),
-        )
+async def process_request(connection: Any, request: Any) -> Any:
+    try:
+        headers = getattr(request, "headers", None)
+        upgrade = (headers.get("Upgrade") or "").lower() if headers else ""
+        if upgrade != "websocket":
+            if hasattr(connection, "respond"):
+                return connection.respond(200, "OK\n")
+    except Exception:
+        pass
     return None
 
 
@@ -466,7 +464,7 @@ async def main() -> None:
         HOST,
         PORT,
         max_size=2 * 1024 * 1024,
-        process_request=health_check,
+        process_request=process_request,
     ):
         await asyncio.Future()
 
