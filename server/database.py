@@ -1,4 +1,3 @@
-
 import os
 import asyncpg
 
@@ -14,7 +13,7 @@ async def create_pool():
         dsn=DATABASE_URL,
         min_size=1,
         max_size=5,
-        command_timeout=30
+        command_timeout=30,
     )
 
 
@@ -32,14 +31,33 @@ async def create_tables(pool):
         """)
 
         await connection.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL
+            );
+        """)
+
+        await connection.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id BIGSERIAL PRIMARY KEY,
-                sender_id BIGINT NOT NULL REFERENCES users(id),
-                recipient_id BIGINT REFERENCES users(id),
+                sender_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                recipient_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                 content TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 read_at TIMESTAMPTZ
             );
+        """)
+
+        await connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_pair_time
+            ON messages (sender_id, recipient_id, id DESC);
+        """)
+
+        await connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sessions_expires
+            ON sessions (expires_at);
         """)
 
     print("PostgreSQL tables are ready.")
