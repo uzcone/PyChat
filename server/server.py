@@ -5,20 +5,20 @@ import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import asyncpg
 import websockets
-from websockets.exceptions import ConnectionClosed
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 SESSION_TTL_DAYS = 30
 MAX_MESSAGE_CHARS = 2000
-MAX_IMAGE_CHARS = 1_500_000  # ~1.1MB base64 data URL limit
+MAX_IMAGE_CHARS = 1_500_000
 
-# active_sockets: websocket -> {"user": str | None, "ip": str}
-active_sockets: dict[websockets.WebSocketServerProtocol, dict] = {}
+# active_sockets: ws -> {"user": str | None}
+active_sockets: dict[Any, dict[str, Any]] = {}
 db_pool: asyncpg.Pool | None = None
 
 
@@ -106,22 +106,21 @@ async def init_db() -> None:
         print(f"DB READY | existing_users={user_count}")
 
 
-async def send_json(ws: websockets.WebSocketServerProtocol, payload: dict) -> None:
+async def send_json(ws: Any, payload: dict[str, Any]) -> None:
     try:
         await ws.send(json.dumps(payload, ensure_ascii=False))
-    except ConnectionClosed:
+    except Exception:
         pass
 
 
 def get_online_users() -> list[str]:
-    users = sorted(
+    return sorted(
         {
             info["user"]
             for info in active_sockets.values()
             if info.get("user")
         }
     )
-    return users
 
 
 async def broadcast_online_users() -> None:
@@ -152,11 +151,7 @@ async def validate_session(token: str) -> str | None:
         return None
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
-            SELECT username, expires_at
-            FROM sessions
-            WHERE token = $1
-            """,
+            "SELECT username, expires_at FROM sessions WHERE token = $1",
             token,
         )
         if not row:
@@ -175,12 +170,12 @@ async def delete_session(token: str) -> None:
         await conn.execute("DELETE FROM sessions WHERE token = $1", token)
 
 
-async def send_chat_history(ws: websockets.WebSocketServerProtocol, current_user: str) -> None:
+async def send_chat_history(ws: Any, current_user: str) -> None:
     assert db_pool is not None
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT sender_username, recipient_username, content, created_at
+            SELECT id, sender_username, recipient_username, content, created_at
             FROM messages
             WHERE recipient_username IS NULL
                OR LOWER(sender_username) = LOWER($1)
@@ -190,20 +185,20 @@ async def send_chat_history(ws: websockets.WebSocketServerProtocol, current_user
             """,
             current_user,
         )
-    items = []
-    for r in reversed(rows):
-        items.append(
-            {
-                "sender": r["sender_username"],
-                "to": r["recipient_username"],
-                "text": r["content"],
-                "time": r["created_at"].isoformat(),
-            }
-        )
+    items = [
+        {
+            "id": r["id"],
+            "sender": r["sender_username"],
+            "to": r["recipient_username"],
+            "text": r["content"],
+            "time": r["created_at"].isoformat(),
+        }
+        for r in reversed(rows)
+    ]
     await send_json(ws, {"type": "HISTORY", "messages": items})
 
 
-async def complete_login(ws: websockets.WebSocketServerProtocol, username: str, token: str | None = None) -> None:
+async def complete_login(ws: Any, username: str, token: str | None = None) -> None:
     session_token = token or await create_session(username)
     active_sockets[ws]["user"] = username
     await send_json(
@@ -226,7 +221,7 @@ async def complete_login(ws: websockets.WebSocketServerProtocol, username: str, 
     await broadcast_online_users()
 
 
-async def handle_register(ws: websockets.WebSocketServerProtocol, data: dict) -> None:
+async def handle_register(ws: Any, data: dict[str, Any]) -> None:
     assert db_pool is not None
     username = normalize_username(data.get("username", ""))
     password = data.get("password", "")
@@ -255,10 +250,7 @@ async def handle_register(ws: websockets.WebSocketServerProtocol, data: dict) ->
             return
 
         await conn.execute(
-            """
-            INSERT INTO users (username, password_salt, password_hash)
-            VALUES ($1, $2, $3)
-            """,
+            "INSERT INTO users (username, password_salt, password_hash) VALUES ($1, $2, $3)",
             username,
             salt_hex,
             digest_hex,
@@ -267,7 +259,7 @@ async def handle_register(ws: websockets.WebSocketServerProtocol, data: dict) ->
     await complete_login(ws, username)
 
 
-async def handle_login(ws: websockets.WebSocketServerProtocol, data: dict) -> None:
+async def handle_login(ws: Any, data: dict[str, Any]) -> None:
     assert db_pool is not None
     username = normalize_username(data.get("username", ""))
     password = data.get("password", "")
@@ -295,7 +287,7 @@ async def handle_login(ws: websockets.WebSocketServerProtocol, data: dict) -> No
     await complete_login(ws, row["username"])
 
 
-async def handle_resume_session(ws: websockets.WebSocketServerProtocol, data: dict) -> None:
+async def handle_resume_session(ws: Any, data: dict[str, Any]) -> None:
     token = (data.get("token") or "").strip()
     username = await validate_session(token)
     if not username:
@@ -304,22 +296,21 @@ async def handle_resume_session(ws: websockets.WebSocketServerProtocol, data: di
     await complete_login(ws, username, token=token)
 
 
-async def handle_logout(ws: websockets.WebSocketServerProtocol, data: dict) -> None:
+async def handle_logout(ws: Any, data: dict[str, Any]) -> None:
     token = (data.get("token") or "").strip()
     await delete_session(token)
     active_sockets[ws]["user"] = None
     await broadcast_online_users()
 
 
-async def handle_message(ws: websockets.WebSocketServerProtocol, data: dict) -> None:
+async def handle_message(ws: Any, data: dict[str, Any]) -> None:
     assert db_pool is not None
     sender = active_sockets.get(ws, {}).get("user")
     if not sender:
         await send_json(ws, {"type": "ERROR", "message": "Avval tizimga kiring."})
         return
 
-    raw_text = data.get("text") or ""
-    text = raw_text.strip()
+    text = (data.get("text") or "").strip()
     if not text:
         return
 
@@ -337,10 +328,11 @@ async def handle_message(ws: websockets.WebSocketServerProtocol, data: dict) -> 
 
     created_dt = now_utc()
     async with db_pool.acquire() as conn:
-        await conn.execute(
+        created_id = await conn.fetchval(
             """
             INSERT INTO messages (sender_username, recipient_username, content, created_at)
             VALUES ($1, $2, $3, $4)
+            RETURNING id
             """,
             sender,
             recipient,
@@ -350,6 +342,7 @@ async def handle_message(ws: websockets.WebSocketServerProtocol, data: dict) -> 
 
     packet = {
         "type": "MESSAGE",
+        "id": created_id,
         "sender": sender,
         "to": recipient,
         "text": text,
@@ -357,14 +350,12 @@ async def handle_message(ws: websockets.WebSocketServerProtocol, data: dict) -> 
     }
 
     if recipient:
-        # Private DM: only sender and recipient receive this packet
         targets = [
             sock
             for sock, info in active_sockets.items()
             if info.get("user") in (sender, recipient)
         ]
     else:
-        # Public general chat: all authenticated sockets
         targets = [
             sock
             for sock, info in active_sockets.items()
@@ -375,10 +366,53 @@ async def handle_message(ws: websockets.WebSocketServerProtocol, data: dict) -> 
         await asyncio.gather(*(send_json(sock, packet) for sock in targets), return_exceptions=True)
 
 
-async def ws_handler(ws: websockets.WebSocketServerProtocol) -> None:
-    ip = ws.remote_address[0] if ws.remote_address else "unknown"
-    active_sockets[ws] = {"user": None, "ip": ip}
+async def handle_delete_message(ws: Any, data: dict[str, Any]) -> None:
+    assert db_pool is not None
+    sender = active_sockets.get(ws, {}).get("user")
+    if not sender:
+        return
 
+    msg_id = data.get("id")
+    if not isinstance(msg_id, int):
+        return
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            DELETE FROM messages
+            WHERE id = $1 AND LOWER(sender_username) = LOWER($2)
+            RETURNING id, sender_username, recipient_username
+            """,
+            msg_id,
+            sender,
+        )
+
+    if not row:
+        await send_json(ws, {"type": "ERROR", "message": "Faqat o'z xabaringizni o'chira olasiz."})
+        return
+
+    recipient = row["recipient_username"]
+    packet = {"type": "MESSAGE_DELETED", "id": row["id"]}
+
+    if recipient:
+        targets = [
+            sock
+            for sock, info in active_sockets.items()
+            if info.get("user") in (sender, recipient)
+        ]
+    else:
+        targets = [
+            sock
+            for sock, info in active_sockets.items()
+            if info.get("user")
+        ]
+
+    if targets:
+        await asyncio.gather(*(send_json(sock, packet) for sock in targets), return_exceptions=True)
+
+
+async def ws_handler(ws: Any) -> None:
+    active_sockets[ws] = {"user": None}
     try:
         async for raw in ws:
             try:
@@ -398,9 +432,11 @@ async def ws_handler(ws: websockets.WebSocketServerProtocol) -> None:
                 await handle_logout(ws, data)
             elif msg_type == "MESSAGE":
                 await handle_message(ws, data)
+            elif msg_type == "DELETE_MESSAGE":
+                await handle_delete_message(ws, data)
             elif msg_type == "PING":
                 await send_json(ws, {"type": "PONG"})
-    except ConnectionClosed:
+    except Exception:
         pass
     finally:
         was_authed = bool(active_sockets.get(ws, {}).get("user"))
