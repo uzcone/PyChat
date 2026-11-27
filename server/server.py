@@ -5,10 +5,12 @@ import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
 from typing import Any
 
 import asyncpg
 import websockets
+from websockets.http11 import Response
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
@@ -445,10 +447,27 @@ async def ws_handler(ws: Any) -> None:
             await broadcast_online_users()
 
 
+async def health_check(connection: Any, request: Any) -> Response | None:
+    upgrade = (request.headers.get("Upgrade") or "").lower()
+    if upgrade != "websocket":
+        return Response(
+            HTTPStatus.OK,
+            "OK\n",
+            websockets.Headers([("Content-Type", "text/plain; charset=utf-8")]),
+        )
+    return None
+
+
 async def main() -> None:
     await init_db()
     print(f"PYCHAT SERVER LISTENING on ws://{HOST}:{PORT}")
-    async with websockets.serve(ws_handler, HOST, PORT, max_size=2 * 1024 * 1024):
+    async with websockets.serve(
+        ws_handler,
+        HOST,
+        PORT,
+        max_size=2 * 1024 * 1024,
+        process_request=health_check,
+    ):
         await asyncio.Future()
 
 
