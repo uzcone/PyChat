@@ -10,9 +10,13 @@ from typing import Any
 
 import asyncpg
 import websockets
+from websockets.datastructures import Headers
 from websockets.http11 import Response
 
-from database import create_pool, create_tables
+try:
+    from database import create_pool, create_tables
+except ImportError:
+    from server.database import create_pool, create_tables
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
@@ -413,7 +417,7 @@ async def process_request(connection: Any, request: Any) -> Any:
             return Response(
                 HTTPStatus.OK.value,
                 HTTPStatus.OK.phrase,
-                websockets.Headers(
+                Headers(
                     [
                         ("Content-Type", "text/plain; charset=utf-8"),
                         ("Content-Length", str(len(body))),
