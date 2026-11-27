@@ -1,7 +1,7 @@
 const WS_URL = "wss://pychat-8gdk.onrender.com";
 const SESSION_STORAGE_KEY = "pychat_session_token";
 
-// DOM Elements
+// DOM Elements (safe lookup)
 const statusDot = document.getElementById("statusDot");
 const connectionText = document.getElementById("connectionText");
 
@@ -62,7 +62,7 @@ let joined = false;
 let onlineUsers = [];
 let activeChat = "general"; // "general" or lowercase username
 let conversations = {
-    general: [] // array of { sender, to, text, time }
+    general: []
 };
 
 function normalizeUser(name) {
@@ -77,38 +77,47 @@ function formatTime(isoString) {
 }
 
 function setConnectionStatus(state, label) {
-    connectionText.textContent = label;
-    statusDot.classList.remove("online");
-    if (state === "online") {
-        statusDot.classList.add("online");
+    if (connectionText) {
+        connectionText.textContent = label;
+    }
+    if (statusDot) {
+        statusDot.classList.remove("online");
+        if (state === "online") {
+            statusDot.classList.add("online");
+        }
     }
 }
 
 function updateSendAvailability() {
     const canSend = Boolean(socket && socket.readyState === WebSocket.OPEN && currentUser && joined);
-    messageInput.disabled = !canSend;
-    sendButton.disabled = !canSend;
+    if (messageInput) messageInput.disabled = !canSend;
+    if (sendButton) sendButton.disabled = !canSend;
     if (attachButton) attachButton.disabled = !canSend;
 }
 
+function resetAuthButtons() {
+    if (loginSubmitBtn) loginSubmitBtn.disabled = false;
+    if (registerSubmitBtn) registerSubmitBtn.disabled = false;
+}
+
 function showAuthScreen() {
-    loginScreen.classList.remove("hidden");
-    chatScreen.classList.add("hidden");
+    if (loginScreen) loginScreen.classList.remove("hidden");
+    if (chatScreen) chatScreen.classList.add("hidden");
     joined = false;
+    resetAuthButtons();
     updateSendAvailability();
 }
 
 function showChatScreen(username) {
     currentUser = username;
-    loginScreen.classList.add("hidden");
-    chatScreen.classList.remove("hidden");
+    if (loginScreen) loginScreen.classList.add("hidden");
+    if (chatScreen) chatScreen.classList.remove("hidden");
+    resetAuthButtons();
 
     const initial = (username[0] || "U").toUpperCase();
-    profileAvatarEl.textContent = initial;
-    profileUsernameEl.textContent = username;
-    if (profileAvatarImageEl) {
-        profileAvatarImageEl.classList.add("hidden");
-    }
+    if (profileAvatarEl) profileAvatarEl.textContent = initial;
+    if (profileUsernameEl) profileUsernameEl.textContent = username;
+    if (profileAvatarImageEl) profileAvatarImageEl.classList.add("hidden");
 
     switchChat("general");
 }
@@ -136,15 +145,17 @@ function switchChat(targetKey) {
     ensureConversation(activeChat);
 
     if (activeChat === "general") {
-        chatContactAvatarEl.textContent = "P";
-        chatHeadingEl.textContent = "General Chat";
-        chatSubtitleEl.textContent = "Welcome to the PyChat community";
+        if (chatContactAvatarEl) chatContactAvatarEl.textContent = "P";
+        if (chatHeadingEl) chatHeadingEl.textContent = "General Chat";
+        if (chatSubtitleEl) chatSubtitleEl.textContent = "Welcome to the PyChat community";
         if (leaveRoomBtn) leaveRoomBtn.classList.add("hidden");
     } else {
-        chatContactAvatarEl.textContent = (activeChat[0] || "U").toUpperCase();
-        chatHeadingEl.textContent = activeChat;
+        if (chatContactAvatarEl) chatContactAvatarEl.textContent = (activeChat[0] || "U").toUpperCase();
+        if (chatHeadingEl) chatHeadingEl.textContent = activeChat;
         const isOnline = onlineUsers.some((u) => normalizeUser(u) === activeChat);
-        chatSubtitleEl.textContent = isOnline ? "Private chat • Online" : "Private chat • Offline";
+        if (chatSubtitleEl) {
+            chatSubtitleEl.textContent = isOnline ? "Private chat • Online" : "Private chat • Offline";
+        }
         if (leaveRoomBtn) leaveRoomBtn.classList.remove("hidden");
     }
 
@@ -162,11 +173,10 @@ function renderConversationsSidebar() {
         .map((u) => normalizeUser(u))
         .filter((u) => u && u !== normalizeUser(currentUser));
 
-    const allPeers = Array.from(new Set([...keys, ...onlineOthers])).filter((peer) =>
-        !query || peer.includes(query)
+    const allPeers = Array.from(new Set([...keys, ...onlineOthers])).filter(
+        (peer) => !query || peer.includes(query)
     );
 
-    // General Chat item
     const generalItem = document.createElement("li");
     generalItem.className = `online-user-item ${activeChat === "general" ? "active" : ""}`;
     generalItem.style.cursor = "pointer";
@@ -177,7 +187,6 @@ function renderConversationsSidebar() {
     generalItem.addEventListener("click", () => switchChat("general"));
     conversationListEl.appendChild(generalItem);
 
-    // Direct message threads
     allPeers.forEach((peer) => {
         const li = document.createElement("li");
         li.className = `online-user-item ${activeChat === peer ? "active" : ""}`;
@@ -189,6 +198,13 @@ function renderConversationsSidebar() {
         li.addEventListener("click", () => switchChat(peer));
         conversationListEl.appendChild(li);
     });
+}
+
+function appendMention(username) {
+    if (!messageInput || messageInput.disabled) return;
+    const prefix = messageInput.value && !messageInput.value.endsWith(" ") ? " " : "";
+    messageInput.value = `${messageInput.value}${prefix}@${username} `;
+    messageInput.focus();
 }
 
 function createOnlineChip(username, compact = false) {
@@ -229,19 +245,12 @@ function createOnlineChip(username, compact = false) {
     chip.appendChild(dot);
 
     chip.addEventListener("click", () => {
-        if (cleanName !== normalizeUser(currentUser)) {
+        if (cleanName && cleanName !== normalizeUser(currentUser)) {
             switchChat(cleanName);
         }
     });
 
     return chip;
-}
-
-function appendMention(username) {
-    if (messageInput.disabled) return;
-    const prefix = messageInput.value && !messageInput.value.endsWith(" ") ? " " : "";
-    messageInput.value = `${messageInput.value}${prefix}@${username} `;
-    messageInput.focus();
 }
 
 function renderOnlineUsers(users) {
@@ -292,7 +301,7 @@ function renderOnlineUsers(users) {
         });
     }
 
-    if (activeChat !== "general") {
+    if (activeChat !== "general" && chatSubtitleEl) {
         const isOnline = onlineUsers.some((u) => normalizeUser(u) === activeChat);
         chatSubtitleEl.textContent = isOnline ? "Private chat • Online" : "Private chat • Offline";
     }
@@ -301,6 +310,7 @@ function renderOnlineUsers(users) {
 }
 
 function appendMessageElement(msg) {
+    if (!messagesContainer) return;
     if (emptyStateEl) {
         emptyStateEl.classList.add("hidden");
     }
@@ -313,6 +323,23 @@ function appendMessageElement(msg) {
     meta.className = "message-meta";
     const timeStr = formatTime(msg.time);
     meta.textContent = timeStr ? `${msg.sender} • ${timeStr}` : msg.sender;
+
+    if (isMine && msg.id) {
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.textContent = "×";
+        delBtn.title = "Xabarni o'chirish";
+        delBtn.style.marginLeft = "8px";
+        delBtn.style.border = "none";
+        delBtn.style.background = "transparent";
+        delBtn.style.color = "inherit";
+        delBtn.style.cursor = "pointer";
+        delBtn.style.fontWeight = "700";
+        delBtn.addEventListener("click", () => {
+            sendJson({ type: "DELETE_MESSAGE", id: msg.id });
+        });
+        meta.appendChild(delBtn);
+    }
 
     const bubble = document.createElement("div");
     bubble.className = "message-bubble";
@@ -337,6 +364,7 @@ function appendMessageElement(msg) {
 }
 
 function renderActiveMessages() {
+    if (!messagesContainer) return;
     const list = ensureConversation(activeChat);
     messagesContainer.innerHTML = "";
 
@@ -374,7 +402,7 @@ function sendJson(payload) {
 }
 
 function sendCurrentMessage(customContent = null) {
-    if (!joined || !currentUser) return;
+    if (!joined || !currentUser || !messageInput) return;
     const text = customContent !== null ? customContent : messageInput.value.trim();
     if (!text) return;
 
@@ -427,17 +455,16 @@ function connectSocket() {
                 if (data.token) {
                     localStorage.setItem(SESSION_STORAGE_KEY, data.token);
                 }
-                loginErrorEl.textContent = "";
-                registerErrorEl.textContent = "";
+                if (loginErrorEl) loginErrorEl.textContent = "";
+                if (registerErrorEl) registerErrorEl.textContent = "";
                 conversations = { general: [] };
                 showChatScreen(data.username);
                 break;
 
             case "AUTH_ERROR":
-                loginErrorEl.textContent = data.message || "Authentication failed.";
-                registerErrorEl.textContent = data.message || "Registration failed.";
-                loginSubmitBtn.disabled = false;
-                registerSubmitBtn.disabled = false;
+                if (loginErrorEl) loginErrorEl.textContent = data.message || "Authentication failed.";
+                if (registerErrorEl) registerErrorEl.textContent = data.message || "Registration failed.";
+                resetAuthButtons();
                 break;
 
             case "SESSION_EXPIRED":
@@ -468,6 +495,15 @@ function connectSocket() {
                 ingestMessage(data);
                 break;
 
+            case "MESSAGE_DELETED": {
+                const targetId = data.id;
+                Object.keys(conversations).forEach((key) => {
+                    conversations[key] = conversations[key].filter((m) => m.id !== targetId);
+                });
+                renderActiveMessages();
+                break;
+            }
+
             case "ERROR":
                 alert(data.message || "Error occurred.");
                 break;
@@ -493,26 +529,28 @@ function connectSocket() {
 
 // Auth UI Events
 showRegisterBtn?.addEventListener("click", () => {
-    loginForm.classList.add("hidden");
-    registerForm.classList.remove("hidden");
-    loginErrorEl.textContent = "";
-    registerErrorEl.textContent = "";
+    loginForm?.classList.add("hidden");
+    registerForm?.classList.remove("hidden");
+    if (loginErrorEl) loginErrorEl.textContent = "";
+    if (registerErrorEl) registerErrorEl.textContent = "";
 });
 
 showLoginBtn?.addEventListener("click", () => {
-    registerForm.classList.add("hidden");
-    loginForm.classList.remove("hidden");
-    loginErrorEl.textContent = "";
-    registerErrorEl.textContent = "";
+    registerForm?.classList.add("hidden");
+    loginForm?.classList.remove("hidden");
+    if (loginErrorEl) loginErrorEl.textContent = "";
+    if (registerErrorEl) registerErrorEl.textContent = "";
 });
 
 toggleLoginPasswordBtn?.addEventListener("click", () => {
+    if (!loginPasswordInput) return;
     const isPass = loginPasswordInput.type === "password";
     loginPasswordInput.type = isPass ? "text" : "password";
     toggleLoginPasswordBtn.textContent = isPass ? "Hide" : "Show";
 });
 
 toggleRegisterPasswordBtn?.addEventListener("click", () => {
+    if (!registerPasswordInput) return;
     const isPass = registerPasswordInput.type === "password";
     registerPasswordInput.type = isPass ? "text" : "password";
     toggleRegisterPasswordBtn.textContent = isPass ? "Hide" : "Show";
@@ -520,30 +558,30 @@ toggleRegisterPasswordBtn?.addEventListener("click", () => {
 
 loginForm?.addEventListener("submit", (e) => {
     e.preventDefault();
-    loginErrorEl.textContent = "";
-    const username = loginUsernameInput.value.trim();
-    const password = loginPasswordInput.value;
+    if (loginErrorEl) loginErrorEl.textContent = "";
+    const username = (loginUsernameInput?.value || "").trim();
+    const password = loginPasswordInput?.value || "";
     if (!username || !password) {
-        loginErrorEl.textContent = "Username va parolni kiriting.";
+        if (loginErrorEl) loginErrorEl.textContent = "Username va parolni kiriting.";
         return;
     }
     if (!sendJson({ type: "LOGIN", username, password })) {
-        loginErrorEl.textContent = "Server bilan aloqa yo'q. Qayta ulanilmoqda...";
+        if (loginErrorEl) loginErrorEl.textContent = "Server bilan aloqa yo'q. Qayta ulanilmoqda...";
         connectSocket();
     }
 });
 
 registerForm?.addEventListener("submit", (e) => {
     e.preventDefault();
-    registerErrorEl.textContent = "";
-    const username = registerUsernameInput.value.trim();
-    const password = registerPasswordInput.value;
+    if (registerErrorEl) registerErrorEl.textContent = "";
+    const username = (registerUsernameInput?.value || "").trim();
+    const password = registerPasswordInput?.value || "";
     if (!username || password.length < 8) {
-        registerErrorEl.textContent = "Username kiriting va parol kamida 8 belgi bo'lsin.";
+        if (registerErrorEl) registerErrorEl.textContent = "Username kiriting va parol kamida 8 belgi bo'lsin.";
         return;
     }
     if (!sendJson({ type: "REGISTER", username, password })) {
-        registerErrorEl.textContent = "Server bilan aloqa yo'q. Qayta ulanilmoqda...";
+        if (registerErrorEl) registerErrorEl.textContent = "Server bilan aloqa yo'q. Qayta ulanilmoqda...";
         connectSocket();
     }
 });
@@ -586,7 +624,7 @@ messageInput?.addEventListener("keydown", (e) => {
 });
 
 attachButton?.addEventListener("click", () => {
-    if (!messageInput.disabled && fileUploadInput) {
+    if (messageInput && !messageInput.disabled && fileUploadInput) {
         fileUploadInput.click();
     }
 });
