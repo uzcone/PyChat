@@ -1,4 +1,3 @@
-
 "use strict";
 
 // =====================================
@@ -115,6 +114,33 @@ function updateSendAvailability() {
     if (messageInput) {
         messageInput.disabled = !joined;
     }
+}
+
+function clearReconnectTimer() {
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+}
+
+function detachSocketListeners(ws) {
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onclose = null;
+}
+
+function getPacketErrorMessage(packet, fallback = "Authentication failed.") {
+    if (!packet || typeof packet !== "object") {
+        return fallback;
+    }
+    return (
+        packet.message ||
+        packet.error ||
+        packet.reason ||
+        fallback
+    );
 }
 
 
@@ -282,6 +308,17 @@ function loadSession() {
             return null;
         }
 
+        if (session.expires_at) {
+            const expMs =
+                typeof session.expires_at === "number"
+                    ? (session.expires_at < 1e12 ? session.expires_at * 1000 : session.expires_at)
+                    : Date.parse(session.expires_at);
+
+            if (Number.isFinite(expMs) && Date.now() >= expMs) {
+                return null;
+            }
+        }
+
         return session;
 
     } catch (error) {
@@ -301,7 +338,9 @@ function loadLegacyAccount() {
         if (
             !account ||
             typeof account.username !== "string" ||
-            typeof account.password !== "string"
+            !account.username ||
+            typeof account.password !== "string" ||
+            !account.password
         ) {
             return null;
         }
@@ -359,15 +398,17 @@ function connectAndAuthenticate(type, data) {
         }
 
         connectionInProgress = true;
+        clearReconnectTimer();
 
         if (socket) {
+            const prevSocket = socket;
+            socket = null;
+            detachSocketListeners(prevSocket);
             try {
-                socket.close();
+                prevSocket.close();
             } catch (error) {
                 console.warn(error);
             }
-
-            socket = null;
         }
 
         let settled = false;
@@ -376,8 +417,13 @@ function connectAndAuthenticate(type, data) {
         socket = ws;
 
         const timeout = setTimeout(() => {
-            fail(new Error("Connection timed out. Please try again."));
-            ws.close();
+            const err = new Error("Connection timed out. Please try again.");
+            fail(err);
+            detachSocketListeners(ws);
+            try {
+                ws.close();
+            } catch (_) {}
+            if (socket === ws) socket = null;
         }, 30000);
 
         function finish() {
@@ -385,11 +431,20 @@ function connectAndAuthenticate(type, data) {
             connectionInProgress = false;
         }
 
-        function fail(error) {
+        function fail(error, closeSocket = false) {
             if (settled) return;
 
             settled = true;
             finish();
+
+            if (closeSocket) {
+                detachSocketListeners(ws);
+                try {
+                    ws.close(4000, "Auth failed");
+                } catch (_) {}
+                if (socket === ws) socket = null;
+            }
+
             reject(error);
         }
 
@@ -402,6 +457,8 @@ function connectAndAuthenticate(type, data) {
         }
 
         ws.onopen = () => {
+            if (settled || socket !== ws) return;
+
             setStatus(false, "Authenticating...");
 
             ws.send(JSON.stringify({
@@ -411,6 +468,8 @@ function connectAndAuthenticate(type, data) {
         };
 
         ws.onmessage = (event) => {
+            if (socket !== ws) return;
+
             let packet;
 
             try {
@@ -420,12 +479,17 @@ function connectAndAuthenticate(type, data) {
                 return;
             }
 
-            handlePacket(packet, succeed, fail);
+            handlePacket(
+                packet,
+                succeed,
+                (authError) => fail(authError, true)
+            );
         };
 
         ws.onerror = () => {
-            setStatus(false, "Connection error");
+            if (socket !== ws) return;
 
+            setStatus(false, "Connection error");
             fail(new Error("Unable to connect to PyChat server."));
         };
 
@@ -436,24 +500,22 @@ function connectAndAuthenticate(type, data) {
                 socket = null;
             }
 
+            const wasJoined = joined;
             joined = false;
             updateSendAvailability();
 
             if (!settled) {
+                setStatus(false, "Disconnected");
                 fail(new Error("Connection closed. Please try again."));
+                return;
             }
 
-            setStatus(false, "Disconnected");
-
-            if (autoLoginEnabled && !manualDisconnect) {
+            // Auth allaqachon tugagan (muvaffaqiyatli bo'lgan) holatda uzilish
+            if (wasJoined && autoLoginEnabled && !manualDisconnect) {
                 setStatus(false, "Reconnecting...");
                 scheduleReconnect();
-
-            } else if (!autoLoginEnabled && !manualDisconnect) {
-                if (loginError) {
-                    loginError.textContent =
-                        "Connection closed. Please try again.";
-                }
+            } else {
+                setStatus(false, "Offline");
             }
         };
     });
@@ -544,9 +606,12 @@ function scheduleReconnect() {
 // =====================================
 
 function handlePacket(packet, onSuccess, onError) {
-    if (!packet || !packet.type) return;
+    if (!packet || typeof packet !== "object") return;
 
-    switch (packet.type) {
+    const packetType = String(packet.type || "").toUpperCase();
+    if (!packetType) return;
+
+    switch (packetType) {
 
         case "WELCOME": {
             joined = true;
@@ -651,7 +716,7 @@ function handlePacket(packet, onSuccess, onError) {
 
         case "ERROR": {
             const error = new Error(
-                packet.message || "Authentication failed."
+                getPacketErrorMessage(packet, "Authentication failed.")
             );
 
             if (!joined && typeof onError === "function") {
@@ -694,6 +759,7 @@ async function login() {
     }
 
     manualDisconnect = false;
+    autoLoginEnabled = false;
 
     const credentials = {
         username: name,
@@ -769,6 +835,7 @@ async function register() {
     }
 
     manualDisconnect = false;
+    autoLoginEnabled = false;
 
     const credentials = {
         username: name,
@@ -806,6 +873,8 @@ async function automaticLogin() {
         : loadLegacyAccount();
 
     if (!savedSession && !savedAccount) {
+        removeSavedSession();
+        showLogin();
         showLoginForm();
         return;
     }
@@ -843,40 +912,35 @@ async function automaticLogin() {
             error.message
         );
 
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
+        clearReconnectTimer();
 
-        if (savedSession) {
+        const message = (error.message || "").toLowerCase();
+        const isNetworkError =
+            message.includes("connection closed") ||
+            message.includes("connection timed out") ||
+            message.includes("unable to connect") ||
+            message.includes("network");
+
+        if (savedSession && !isNetworkError) {
             removeSavedSession();
             showLogin();
             showLoginForm();
 
             if (loginError) {
                 loginError.textContent =
-                    "Your session has expired. Please sign in again.";
+                    error.message || "Your session has expired. Please sign in again.";
             }
+        } else if (!isNetworkError) {
+            removeSavedSession();
+            showLogin();
+            showLoginForm();
 
+            if (loginError) {
+                loginError.textContent = error.message;
+            }
         } else {
-            const message = error.message.toLowerCase();
-
-            if (
-                message.includes("incorrect username") ||
-                message.includes("already online") ||
-                message.includes("invalid") ||
-                message.includes("password")
-            ) {
-                removeSavedSession();
-                showLogin();
-                showLoginForm();
-
-                if (loginError) {
-                    loginError.textContent = error.message;
-                }
-
-            } else {
-                setStatus(false, "Reconnecting...");
-                scheduleReconnect();
-            }
+            setStatus(false, "Reconnecting...");
+            scheduleReconnect();
         }
     }
 }
@@ -1140,14 +1204,13 @@ function leaveChat() {
     autoLoginEnabled = false;
     joined = false;
 
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-
+    clearReconnectTimer();
     updateSendAvailability();
 
     if (socket) {
         const oldSocket = socket;
         socket = null;
+        detachSocketListeners(oldSocket);
 
         if (oldSocket.readyState === WebSocket.OPEN) {
             oldSocket.send(JSON.stringify({
@@ -1170,8 +1233,7 @@ function logout() {
     manualDisconnect = true;
     joined = false;
 
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
+    clearReconnectTimer();
 
     if (socket && socket.readyState === WebSocket.OPEN) {
         try {
@@ -1186,6 +1248,7 @@ function logout() {
 
     const oldSocket = socket;
     socket = null;
+    detachSocketListeners(oldSocket);
 
     if (oldSocket) {
         oldSocket.close();
