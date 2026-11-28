@@ -1,85 +1,64 @@
 import os
 import asyncpg
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+def get_database_url() -> str:
+    url = (os.getenv("DATABASE_URL") or "").strip()
+    if not url:
+        raise RuntimeError("DATABASE_URL environment variable is not set.")
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+    return url
 
 
 async def create_pool() -> asyncpg.Pool:
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL environment variable is missing")
-
+    dsn = get_database_url()
+    use_ssl = "localhost" not in dsn and "127.0.0.1" not in dsn
     return await asyncpg.create_pool(
-        dsn=DATABASE_URL,
+        dsn=dsn,
         min_size=1,
         max_size=5,
-        command_timeout=30,
+        ssl="require" if use_ssl else None,
     )
 
 
 async def create_tables(pool: asyncpg.Pool) -> None:
-    async with pool.acquire() as connection:
-        await connection.execute(
+    async with pool.acquire() as conn:
+        await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
-                id BIGSERIAL PRIMARY KEY,
-                username VARCHAR(30) NOT NULL UNIQUE,
-                password_salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(32) UNIQUE NOT NULL,
+                password_salt VARCHAR(64) NOT NULL,
+                password_hash VARCHAR(128) NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+            )
             """
         )
-
-        await connection.execute(
+        await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sessions (
-                token TEXT PRIMARY KEY,
-                username VARCHAR(30) NOT NULL REFERENCES users(username) ON DELETE CASCADE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                expires_at TIMESTAMPTZ NOT NULL
-            );
+                token VARCHAR(128) PRIMARY KEY,
+                username VARCHAR(32) NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
             """
         )
-
-        await connection.execute(
+        await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
-                id BIGSERIAL PRIMARY KEY,
-                sender_username VARCHAR(30) NOT NULL,
-                recipient_username VARCHAR(30),
+                id SERIAL PRIMARY KEY,
+                sender_username VARCHAR(32) NOT NULL,
+                recipient_username VARCHAR(32) NULL,
                 content TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+            )
             """
         )
-
-        await connection.execute(
-            """
-            ALTER TABLE messages
-            ADD COLUMN IF NOT EXISTS recipient_username VARCHAR(30);
-            """
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_created_id ON messages (id DESC)"
         )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_messages_recipient
-            ON messages (recipient_username);
-            """
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions (expires_at)"
         )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_messages_created_at
-            ON messages (created_at DESC, id DESC);
-            """
-        )
-
-        await connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_sessions_expires
-            ON sessions (expires_at);
-            """
-        )
-        
-
-    print("PostgreSQL tables are ready.")
