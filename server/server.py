@@ -10,8 +10,6 @@ from typing import Any
 
 import asyncpg
 import websockets
-from websockets.datastructures import Headers
-from websockets.http11 import Response
 
 try:
     from database import create_pool, create_tables
@@ -413,19 +411,7 @@ async def process_request(connection: Any, request: Any) -> Any:
         headers = getattr(request, "headers", None)
         upgrade = (headers.get("Upgrade") or "").lower() if headers else ""
         if upgrade != "websocket":
-            body = b"OK\n"
-            return Response(
-                HTTPStatus.OK.value,
-                HTTPStatus.OK.phrase,
-                Headers(
-                    [
-                        ("Content-Type", "text/plain; charset=utf-8"),
-                        ("Content-Length", str(len(body))),
-                        ("Connection", "close"),
-                    ]
-                ),
-                body,
-            )
+            return connection.respond(HTTPStatus.OK, "OK\n")
     except Exception:
         pass
     return None
